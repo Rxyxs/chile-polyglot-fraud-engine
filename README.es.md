@@ -202,6 +202,55 @@ correccion del §5: `velocity_burst` 35/35, `blacklisted_merchant` 43/43,
 `high_risk_country` 16/16, `structuring` 16/16 — todos los arquetipos al
 100% ahora.
 
+## Que Prueba (y Que No Prueba) un Puntaje Perfecto
+
+Un 1,000/1,000/1,000 de precision/recall/F1 en un set de prueba de
+deteccion de fraude deberia levantar una ceja, no cerrar la discusion —
+asi que aqui esta lo que realmente lo produjo y lo que demuestra y no
+demuestra.
+
+**Por que es tan limpio**: cada uno de los cuatro arquetipos de fraude en
+`generate_data.py` fue construido con una firma casi determinista en al
+menos una capa — un ID de comercio en lista negra esta o no esta en
+`BLACKLISTED_MERCHANT_IDS`, un codigo de pais esta o no esta en
+`HIGH_RISK_COUNTRY_CODES`, una rafaga de velocidad produce un
+`velocity_score` muy fuera del rango que cualquier transaccion legitima
+alcanza en este dataset. Una vez corregidos los dos bugs del §5 (la
+colision de ID de comercio, e IsolationForest absorbiendo las banderas de
+reglas en vez de que LightGBM las viera directamente), no quedaba ninguna
+fuente de ruido en las etiquetas ni de dilucion de señal entre las filas de
+fraude y la poblacion legitima que LightGBM tuviera que resolver. Un
+ensemble de arboles encuentra una separacion limpia cuando esta
+genuinamente existe en los datos que se le entregan.
+
+**Que valida esto**: las afirmaciones de *ingenieria* de este README son
+reales independientemente del puntaje — que el modulo C calcula correcta y
+rapidamente (la tabla de latencia del §6, independiente de cualquier
+metrica de ML), que el DSL de Ruby evalua sus reglas correctamente (RSpec,
+independiente de LightGBM), que las salidas de las tres capas realmente
+llegan a LightGBM como señales distintas y no redundantes (la investigacion
+de importancia de atributos del §5), y que el pipeline completo sirve una
+solicitud en milisegundos de un solo digito. Esas son las partes de este
+proyecto que prueban la *correccion de este codigo especifico*, y los tests
+en `tests/` se mantienen sin importar que tan separable sea la señal de
+fraude.
+
+**Que no valida esto**: que este sistema detectaria el 100% del fraude en
+un banco chileno real. El fraude real no se anuncia con una coincidencia en
+una lista negra mantenida o un codigo de pais de una lista corta fija — se
+adapta especificamente para evadir cualquier regla o modelo actualmente
+desplegado, y los datos de transacciones reales tienen distribuciones
+desordenadas y superpuestas que un generador sintetico desde cero con
+cuatro arquetipos fijos no reproduce. Un puntaje perfecto aqui es evidencia
+de que la *arquitectura* esta conectada correctamente, no evidencia de que
+el *problema de deteccion de fraude* esta resuelto. Quien adapte este
+pipeline a datos reales deberia esperar — y diseñar para — un recall bien
+por debajo del 100% y un conteo de falsos positivos significativamente
+mayor, con la maquinaria de ajuste de umbral y seguimiento de costos en
+`train_model.py` (`find_best_f1_threshold`, el desglose de la matriz de
+confusion) haciendo trabajo real en vez de confirmar una conclusion ya
+decidida de antemano.
+
 ## Latencia (medida, no estimada — `tests/python/test_latency.py`)
 
 | Capa | Costo medido | Como |
@@ -237,7 +286,54 @@ este repositorio reporta el trade-off en vez de ocultarlo.
 ![Matriz de Confusion](outputs/plots/confusion_matrix.png)
 ![Importancia de Atributos](outputs/plots/feature_importance.png)
 
-# 7. Estructura del Repositorio
+# 7. Conclusion
+
+La pregunta que este proyecto buscaba responder no era "¿puede un
+clasificador detectar fraude sintetico?" — eso nunca iba a ser la parte
+dificil una vez que existiera el generador de datos. Era si tres lenguajes,
+elegidos por aquello en lo que cada uno es realmente bueno, podian
+conectarse en una sola ruta de solicitud sin que (a) la interoperabilidad
+se convirtiera en el cuello de botella, o (b) la integracion fuera
+decorativa — tres puntajes calculados de forma independiente y
+promediados, sin que la salida de ningun lenguaje informara realmente a
+otro. Los §5 y §6 son la evidencia en ambos sentidos: el primer bug (la
+colision de ID de comercio) fue un error de generacion de datos, ordinario
+y facil de imaginar en cualquier pipeline de ML. El segundo bug —
+IsolationForest absorbiendo silenciosamente las banderas de reglas de Ruby
+en un puntaje proxy que LightGBM usaba en vez de la señal real — es
+especificamente un bug de integracion, del tipo que solo existe *porque*
+esta es una arquitectura en capas y que no ocurriria en un pipeline de un
+solo modelo. Encontrarlo y corregirlo, y poder señalar
+`feature_importance()` despues y mostrar que la señal de Ruby llega
+directamente a LightGBM, es el entregable real de este repositorio; el
+recall de 1,000 es un subproducto.
+
+**Que tendria que cambiar para un despliegue real**, aproximadamente en
+orden de cuanto trabajo requiere cada uno: (1) reemplazar el generador
+sintetico con historial de transacciones real (anonimizado, revisado por
+cumplimiento normativo), lo que inmediatamente sacara a la luz
+distribuciones superpuestas entre fraude y legitimo que los cuatro
+arquetipos limpios de este dataset no tienen; (2) agregar monitoreo de
+drift sobre las distribuciones de `rules_risk_score` y `velocity_score`, ya
+que un DSL de reglas que no se revisita a medida que los patrones de fraude
+cambian es un DSL de reglas quedandose obsoleto silenciosamente; (3)
+reemplazar o agrupar (batch) la llamada a `IsolationForest` (seccion de
+latencia del §6) si la latencia sub-milisegundo de punta a punta alguna vez
+se vuelve un requisito real en vez de una meta aspiracional; (4) agregar
+una cola de revision humana para la banda de probabilidad alrededor del
+umbral de decision en vez de un corte duro, ya que los despliegues reales
+raramente confian ciegamente en los casos limite de un sistema automatico;
+(5) versionar y desplegar en canario el conjunto de reglas de Ruby de forma
+independiente del modelo de ML, ya que los analistas de riesgo querran
+publicar una nueva entrada de lista negra sin esperar un reentrenamiento
+del modelo.
+
+Nada de eso cambia la apuesta arquitectonica central de este proyecto: que
+las capas nativa-compilada, DSL, y ML pertenecen cada una a un pipeline de
+fraude por razones distintas, y que hacer que cooperen — no solo que
+coexistan en el mismo repositorio — vale el costo de integracion.
+
+# 8. Estructura del Repositorio
 
 ```
 chile-polyglot-fraud-engine/
@@ -274,7 +370,7 @@ chile-polyglot-fraud-engine/
 └── README.es.md
 ```
 
-# 8. Instalacion y Uso
+# 9. Instalacion y Uso
 
 Requiere: **MSVC** (Visual Studio Build Tools o Visual Studio con el
 workload "Desktop development with C++") para la capa C; **Ruby 3.2+** con
@@ -306,7 +402,7 @@ Targets individuales: `make build-c`, `make test-c`, `make bench-c`,
 `make test-python`, `make clean`. Ejecuta `make help` para la lista
 completa.
 
-# 9. Descargo de Responsabilidad
+# 10. Descargo de Responsabilidad
 
 Todos los datos de transacciones son generados sinteticamente
 (`src/python/generate_data.py`, con semilla fija, reproducible) con fines
@@ -318,6 +414,6 @@ una demostracion con datos sinteticos, no cifras legales verificadas —
 consulta las fuentes oficiales de la CMF/UAF para umbrales de cumplimiento
 reales.
 
-# 10. Licencia
+# 11. Licencia
 
 MIT — ver [LICENSE](LICENSE) para el texto completo.

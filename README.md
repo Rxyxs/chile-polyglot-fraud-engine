@@ -186,6 +186,50 @@ Recall by fraud archetype on the test split, after the fix in §5:
 `velocity_burst` 35/35, `blacklisted_merchant` 43/43, `high_risk_country`
 16/16, `structuring` 16/16 — every archetype now at 100%.
 
+## What a Perfect Score Does and Doesn't Prove
+
+A 1.000/1.000/1.000 precision/recall/F1 on a fraud-detection test set should
+raise an eyebrow, not close the discussion — so here is what actually
+produced it and what it does and doesn't demonstrate.
+
+**Why it's this clean**: each of the four fraud archetypes in
+`generate_data.py` was constructed with a close-to-deterministic signature
+in at least one layer — a blacklisted merchant ID either is or isn't in
+`BLACKLISTED_MERCHANT_IDS`, a country code either is or isn't in
+`HIGH_RISK_COUNTRY_CODES`, a velocity burst produces a `velocity_score` far
+outside the range any legit transaction in this dataset reaches. Once §5's
+two bugs were fixed (the merchant-ID collision, and IsolationForest
+absorbing the rule flags instead of LightGBM seeing them directly), there
+was no remaining source of label noise or signal dilution between the
+fraud rows and the legit population for LightGBM to have to work through.
+A tree ensemble finds a clean split when one genuinely exists in the data
+it's given.
+
+**What this validates**: the *engineering* claims in this README are real
+regardless of the score — that the C module computes correctly and fast
+(§6's latency table, independent of any ML metric), that the Ruby DSL
+evaluates its rules correctly (RSpec, independent of LightGBM), that the
+three layers' outputs actually reach LightGBM as distinct, non-redundant
+signals (the feature-importance investigation in §5), and that the whole
+pipeline serves a request in single-digit milliseconds. Those are the parts
+of this project that are testing *this specific codebase's correctness*,
+and the tests in `tests/` hold regardless of how separable the fraud
+signal is.
+
+**What it doesn't validate**: that this system would catch 100% of fraud
+in a real Chilean bank. Real fraud doesn't announce itself with a
+maintained blacklist match or a country code from a fixed short list — it
+adapts specifically to evade whatever rule or model is currently deployed,
+and real transaction data has messy, overlapping distributions that a
+from-scratch synthetic generator with four fixed archetypes doesn't
+reproduce. A perfect score here is evidence the *architecture* is wired
+correctly, not evidence the *fraud-detection problem* is solved. Anyone
+adapting this pipeline to real data should expect — and design for —
+recall well under 100% and a meaningfully larger false-positive count, with
+the threshold-tuning and cost-tracking machinery in `train_model.py`
+(`find_best_f1_threshold`, the confusion-matrix breakdown) doing real work
+rather than confirming a foregone conclusion.
+
 ## Latency (measured, not estimated — `tests/python/test_latency.py`)
 
 | Layer | Measured cost | How |
@@ -219,7 +263,47 @@ repository reports the trade-off rather than hiding it.
 ![Confusion Matrix](outputs/plots/confusion_matrix.png)
 ![Feature Importance](outputs/plots/feature_importance.png)
 
-# 7. Repository Structure
+# 7. Conclusion
+
+The question this project set out to answer wasn't "can a classifier catch
+synthetic fraud" — that was never going to be the hard part once the data
+generator existed. It was whether three languages, chosen for what each is
+actually good at, could be wired into one request path without either
+(a) the interop becoming the bottleneck, or (b) the integration being
+decorative — three scores computed independently and averaged, with no
+language's output actually informing another's. §5 and §6 are the evidence
+either way: the first bug (the merchant-ID collision) was a data-generation
+mistake, ordinary and easy to imagine in any ML pipeline. The second bug —
+IsolationForest quietly absorbing Ruby's rule flags into a proxy score
+LightGBM then leaned on instead of the real thing — is specifically an
+integration bug, the kind that only exists *because* this is a layered
+architecture and wouldn't occur in a single-model pipeline. Finding and
+fixing it, and being able to point at `feature_importance()` afterward and
+show Ruby's signal reaching LightGBM directly, is the actual deliverable of
+this repo; the 1.000 recall is a byproduct.
+
+**What would need to change for a real deployment**, roughly in order of
+how much work each is: (1) replace the synthetic generator with real
+(anonymized, compliance-reviewed) transaction history, which will
+immediately surface overlapping distributions between fraud and legit
+that this dataset's four clean archetypes don't have; (2) add drift
+monitoring on `rules_risk_score` and `velocity_score`'s distributions, since
+a rules DSL that isn't revisited as fraud patterns shift is a rules DSL
+quietly going stale; (3) replace or batch the `IsolationForest` call (§6's
+latency section) if end-to-end sub-millisecond latency ever becomes a real
+requirement rather than a stretch goal; (4) add a human-review queue for
+the probability band around the decision threshold instead of a hard
+cutoff, since real deployments rarely trust an automated system's boundary
+cases blindly; (5) version and canary the Ruby rule set independently from
+the ML model, since risk analysts will want to ship a new blacklist entry
+without waiting on a model retrain.
+
+None of that changes the core architectural bet this project makes: that
+compiled-native, DSL, and ML layers each belong in a fraud pipeline for
+different reasons, and that making them cooperate — not just coexist in
+the same repo — is worth the integration cost.
+
+# 8. Repository Structure
 
 ```
 chile-polyglot-fraud-engine/
@@ -256,7 +340,7 @@ chile-polyglot-fraud-engine/
 └── README.es.md
 ```
 
-# 8. Setup & Usage
+# 9. Setup & Usage
 
 Requires: **MSVC** (Visual Studio Build Tools or Visual Studio with the
 "Desktop development with C++" workload) for the C layer; **Ruby 3.2+**
@@ -287,7 +371,7 @@ Individual targets: `make build-c`, `make test-c`, `make bench-c`,
 `make install-ruby`, `make test-ruby`, `make generate-data`, `make train`,
 `make test-python`, `make clean`. Run `make help` for the full list.
 
-# 9. Disclaimer
+# 10. Disclaimer
 
 All transaction data is synthetically generated
 (`src/python/generate_data.py`, seeded, reproducible) for demonstration
@@ -297,6 +381,6 @@ The Chilean AML/CMF-inspired thresholds in the Ruby rules engine (§4) are
 illustrative approximations for a synthetic-data demo, not verified legal
 figures — consult official CMF/UAF sources for real compliance thresholds.
 
-# 10. License
+# 11. License
 
 MIT — see [LICENSE](LICENSE) for the full text.

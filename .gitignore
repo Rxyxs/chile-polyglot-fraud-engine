@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.pytest_cache/
+*.egg-info/
+
+# Ruby (a plain directory-name pattern, not "vendor/bundle/", so it matches
+# at any depth -- src/ruby/vendor/bundle included, not just a root-level one)
+vendor/
+Gemfile.lock
+.bundle/
+
+# C build artifacts (compiled by `make build-c`, regenerate with `make all`).
+# cl.exe drops .obj files next to the source it compiles (src/c/), not just
+# in outputs/models/ where the final linked binaries land.
+outputs/models/*.dll
+outputs/models/*.so
+outputs/models/*.exe
+outputs/models/*.exp
+outputs/models/*.lib
+outputs/models/*.obj
+src/c/*.obj
+
+# Datos y artefactos de ML generados (regenerar con `make all`)
+data/raw/*.parquet
+data/raw/*.csv
+data/processed/*.parquet
+outputs/models/*.joblib
+outputs/models/*.txt
+outputs/models/metadata.json
+outputs/reports/*.json
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!outputs/models/.gitkeep
+!outputs/reports/.gitkeep
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

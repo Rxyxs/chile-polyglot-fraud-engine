@@ -1,0 +1,12 @@
+source 'https://rubygems.org'
+
+ruby '>= 3.2'
+
+# 'json' is a stdlib default gem (available via `require 'json'` with no
+# Gemfile entry) -- deliberately NOT declared here, since doing so makes
+# Bundler fetch and native-compile a standalone copy, which requires
+# MSYS2/DevKit that a plain (non-DevKit) Ruby install doesn't have.
+
+group :test do
+  gem 'rspec', '~> 3.13'
+end

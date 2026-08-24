@@ -4,6 +4,7 @@ import pytest
 
 from src.python.bridge import CVelocityEngine, RubyRulesEngine
 from src.python.train_model import (
+    ISO_FOREST_FEATURE_COLUMNS,
     NUMERIC_FEATURE_COLUMNS,
     build_features,
     evaluate,
@@ -77,3 +78,24 @@ def test_build_features_adds_all_expected_columns_and_no_lookahead(engines):
     assert out.loc[1, "is_impossible_travel"] == 1
     assert out.loc[1, "is_blacklisted_merchant"] == 1
     assert out.loc[1, "rules_flagged"] == 1
+
+
+def test_isolation_forest_never_sees_crisp_rule_engine_flags():
+    """Regression test for a real bug: IsolationForest was originally
+    trained on the full NUMERIC_FEATURE_COLUMNS, including Ruby's crisp
+    rule flags (rules_flagged, is_blacklisted_merchant, ...). It trivially
+    learned "flag == 1 -> anomalous", so its own score absorbed almost all
+    of the Ruby layer's signal (measured: isolation_forest_score carried
+    82.5% of LightGBM's gain, rules_risk_score only 0.4%) -- meaning
+    LightGBM wasn't actually combining the three layers as designed, just
+    routing around Ruby through an opaque proxy. ISO_FOREST_FEATURE_COLUMNS
+    must stay a strict subset of NUMERIC_FEATURE_COLUMNS that excludes every
+    crisp rule-engine-derived flag.
+    """
+    crisp_rule_flags = {
+        "rules_risk_score", "rules_flagged",
+        "is_blacklisted_merchant", "is_high_risk_country",
+        "is_impossible_travel",
+    }
+    assert set(ISO_FOREST_FEATURE_COLUMNS).isdisjoint(crisp_rule_flags)
+    assert set(ISO_FOREST_FEATURE_COLUMNS) < set(NUMERIC_FEATURE_COLUMNS)

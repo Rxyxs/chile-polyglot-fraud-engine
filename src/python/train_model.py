@@ -59,6 +59,27 @@ NUMERIC_FEATURE_COLUMNS = [
     "is_blacklisted_merchant", "is_high_risk_country",
     "txn_count_last_1h", "txn_count_last_24h",
 ]
+
+# Deliberately narrower than NUMERIC_FEATURE_COLUMNS: IsolationForest sees
+# only continuous/behavioral signals, never the crisp rule-engine outputs
+# (rules_risk_score, rules_flagged, is_blacklisted_merchant,
+# is_high_risk_country, is_impossible_travel). A real problem was found by
+# inspecting LightGBM's own feature_importance after training on the full
+# set: IsolationForest, given those near-deterministic flags as input,
+# trivially learned "flag == 1 -> anomalous", so its own score absorbed
+# the Ruby layer's signal almost entirely (isolation_forest_score carried
+# 82.5% of LightGBM's total gain; rules_risk_score 0.4%, rules_flagged and
+# is_blacklisted_merchant ~0%). That meant the final model wasn't actually
+# combining the three layers as designed -- it was routing around Ruby's
+# output through an opaque proxy. Excluding the crisp flags here forces
+# LightGBM to consume Ruby's and C's signals directly, which is what
+# "the ML layer learns to weigh the other two layers" is supposed to mean.
+ISO_FOREST_FEATURE_COLUMNS = [
+    "amount_clp", "hour_of_day", "day_of_week",
+    "distance_from_prev_km", "implied_speed_kmh",
+    "amount_zscore", "velocity_score",
+    "txn_count_last_1h", "txn_count_last_24h",
+]
 SEED = 42
 
 
@@ -258,7 +279,7 @@ def main():
     )
 
     print("[4/6] Training IsolationForest anomaly pre-filter...")
-    X_train = train_df[NUMERIC_FEATURE_COLUMNS].to_numpy()
+    X_train = train_df[ISO_FOREST_FEATURE_COLUMNS].to_numpy()
     fraud_rate = max(train_df["is_fraud"].mean(), 0.001)
     # n_estimators=50 rather than sklearn's default 200: IsolationForest's
     # score_samples() scales its per-call Python-level overhead ~linearly
@@ -277,7 +298,7 @@ def main():
     iso_forest.fit(X_train)
 
     for split_df in (train_df, val_df, test_df):
-        X = split_df[NUMERIC_FEATURE_COLUMNS].to_numpy()
+        X = split_df[ISO_FOREST_FEATURE_COLUMNS].to_numpy()
         split_df["isolation_forest_score"] = -iso_forest.score_samples(X)
 
     lgb_feature_columns = NUMERIC_FEATURE_COLUMNS + ["isolation_forest_score"]

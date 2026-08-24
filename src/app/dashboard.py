@@ -25,7 +25,11 @@ import streamlit as st
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from src.python.train_model import NUMERIC_FEATURE_COLUMNS, time_based_split  # noqa: E402
+from src.python.train_model import (  # noqa: E402
+    ISO_FOREST_FEATURE_COLUMNS,
+    NUMERIC_FEATURE_COLUMNS,
+    time_based_split,
+)
 
 MODELS_DIR = ROOT / "outputs" / "models"
 PLOTS_DIR = ROOT / "outputs" / "plots"
@@ -50,7 +54,7 @@ def load_scored_test_split():
     test_df = test_df.reset_index(drop=True)
 
     metadata, iso_forest, booster = load_artifacts()
-    X = test_df[NUMERIC_FEATURE_COLUMNS].to_numpy()
+    X = test_df[ISO_FOREST_FEATURE_COLUMNS].to_numpy()
     test_df["isolation_forest_score"] = -iso_forest.score_samples(X)
     X_full = test_df[metadata["lgb_feature_columns"]].to_numpy()
     test_df["fraud_probability"] = booster.predict(X_full)

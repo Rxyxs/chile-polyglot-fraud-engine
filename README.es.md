@@ -11,7 +11,7 @@
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.4%2B-F7931E?style=flat&logo=scikitlearn&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.11x-009688?style=flat&logo=fastapi&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.3x-FF4B4B?style=flat&logo=streamlit&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-45%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
+![Tests](https://img.shields.io/badge/tests-46%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
 ![Status](https://img.shields.io/badge/status-research%20%2F%20datos%20sinteticos-lightgrey?style=flat)
 
 Un motor de deteccion de fraude en tres lenguajes para transacciones
@@ -22,7 +22,7 @@ legible (listas negras, paises de alto riesgo, patrones de estructuracion),
 y **Python** entrena y sirve un ensemble IsolationForest + LightGBM que
 consume las salidas de las otras dos capas como atributos. Un solo comando
 (`make all`) compila, genera los datos y entrena todo; `make test` ejecuta
-los 45 tests (11 en C, 10 RSpec, 24 pytest) — cada numero de este README
+los 46 tests (11 en C, 10 RSpec, 25 pytest) — cada numero de este README
 proviene de ejecutar eso en esta maquina.
 
 ---
@@ -128,7 +128,7 @@ fija, no un valor indexado en vivo. No se usa ninguna lista negra,
 comercio, ni dato regulatorio real en ningun lugar de este proyecto — ver
 §9.
 
-# 5. Un Bug Real Encontrado y Corregido al Validar Esto
+# 5. Dos Bugs Reales Encontrados y Corregidos al Validar Esto
 
 `BLACKLISTED_MERCHANT_IDS` originalmente incluia `MER_00013` — que,
 resulto, caia *dentro* del rango de IDs del pool de comercios legitimos
@@ -150,6 +150,36 @@ F1 general a 0,995 — ver
 `tests/python/test_generate_data.py::test_blacklisted_merchant_ids_never_collide_with_legit_pool`
 para el test de regresion en que se convirtio esto.
 
+**Segundo bug, mas arquitectonico**: despues de corregir lo anterior, las
+metricas se veian solidas (F1 0,995), pero eso solo no prueba que LightGBM
+realmente estuviera combinando las tres capas como fue diseñado — podria
+estar simplemente evitando una de ellas. Revisar
+`booster.feature_importance()` directamente mostro justo eso:
+`isolation_forest_score` llevaba **82,5%** de la ganancia total de
+LightGBM, `amount_clp` otro 15,1%, y cada señal derivada de Ruby/C era casi
+invisible (`rules_risk_score` 0,4%, `rules_flagged` e
+`is_blacklisted_merchant` ~0%, `velocity_score` 1,0%). La causa raiz:
+`IsolationForest` se entrenaba con las 14 atributos completos, incluyendo
+las banderas de reglas de Ruby, nitidas y casi deterministicas — asi que
+aprendio trivialmente "`is_blacklisted_merchant == 1` → anomalo" y su
+propio puntaje se convirtio en un proxy que absorbio casi toda la señal de
+la capa Ruby. LightGBM luego simplemente se apoyaba en ese unico atributo
+proxy en vez de ponderar genuinamente las dos capas, que no es lo que la
+arquitectura del §3 afirma hacer. Corregido introduciendo
+`ISO_FOREST_FEATURE_COLUMNS` (`src/python/train_model.py`): un conjunto de
+atributos mas acotado para IsolationForest que contiene solo señales
+continuas/de comportamiento (montos, distancias, velocidades, conteos),
+excluyendo cada bandera derivada del motor de reglas. Despues de
+reentrenar, `rules_risk_score` por si sola salto a **44,0%** de la
+ganancia de LightGBM y `isolation_forest_score` cayo a 0,1% — LightGBM
+ahora depende demostrablemente de la salida de Ruby de forma directa, en
+vez de a traves de un intermediario opaco, que es lo que el diseño de tres
+capas se supone que debe demostrar. (Las metricas del split de prueba
+tambien mejoraron a un precision/recall/F1 perfecto de 1,000/1,000/1,000,
+aunque eso es un efecto secundario de la correccion, no su objetivo — el
+objetivo era hacer real e inspeccionable la integracion entre capas, no
+solo numericamente fuerte.)
+
 # 6. Resultados (Numeros Reales de una Ejecucion Real)
 
 `make all` en esta maquina (semilla 42, reproducible desde un clon
@@ -160,12 +190,12 @@ mezclar).
 
 | Metrica | Valor (split de prueba) |
 |---|---|
-| Precision | 0,982 |
+| Precision | 1,000 |
 | Recall | **1,000** (110/110 fraudes detectados) |
-| F1 | 0,991 |
+| F1 | 1,000 |
 | ROC-AUC | 1,000 |
-| PR-AUC | 0,99999... |
-| Falsos positivos | 2 (de 7.390 transacciones legitimas) |
+| PR-AUC | 1,000 |
+| Falsos positivos | 0 (de 7.390 transacciones legitimas) |
 
 Recall por arquetipo de fraude en el split de prueba, despues de la
 correccion del §5: `velocity_burst` 35/35, `blacklisted_merchant` 43/43,
@@ -177,11 +207,11 @@ correccion del §5: `velocity_burst` 35/35, `blacklisted_merchant` 43/43,
 | Capa | Costo medido | Como |
 |---|---|---|
 | Modulo C, benchmark en C puro | **45,5 ns/llamada** | `src/c/bench_main.c`, 2.000.000 iteraciones, `make bench-c` |
-| Modulo C via `ctypes` desde Python | p50 0,0020ms, p95 0,0021ms | 2.000 llamadas, en el mismo proceso |
+| Modulo C via `ctypes` desde Python | p50 0,0019ms, p95 0,0020ms | 2.000 llamadas, en el mismo proceso |
 | Ida y vuelta del motor de reglas Ruby (subproceso persistente) | p50 0,070ms, p95 0,092ms, max 0,237ms | 300 llamadas sobre JSON por stdin/stdout |
 | `score_samples()` de IsolationForest, una fila | ~1,8ms | costo dominante en el pipeline completo — ver abajo |
 | `predict()` de LightGBM, una fila | p50 0,064ms, p95 0,112ms | |
-| **Solicitud completa `/detect-fraud`** (todas las capas + FastAPI) | **p50 4,22ms, p95 4,80ms, max 5,58ms** | 200 solicitudes via `TestClient` de FastAPI |
+| **Solicitud completa `/detect-fraud`** (todas las capas + FastAPI) | **p50 4,19ms, p95 5,51ms, max 6,23ms** | 200 solicitudes via `TestClient` de FastAPI |
 
 **Hallazgo honesto**: el objetivo de "< 1ms" del brief es real y se cumple
 — para el modulo C especificamente, a 45,5 nanosegundos por llamada, cuatro
@@ -260,7 +290,7 @@ pip install -r requirements.txt
 # Compila la biblioteca C, instala gemas Ruby, genera datos y entrena todo
 make all
 
-# Ejecuta los 45 tests en los tres lenguajes
+# Ejecuta los 46 tests en los tres lenguajes
 make test
 
 # Levanta la API de scoring en tiempo real (combina C + Ruby + Python por solicitud)

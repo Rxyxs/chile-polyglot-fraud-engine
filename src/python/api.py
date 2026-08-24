@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from src.python.bridge import CVelocityEngine, RubyRulesEngine
 from src.python.generate_data import BLACKLISTED_MERCHANT_IDS, HIGH_RISK_COUNTRY_CODES
-from src.python.train_model import NUMERIC_FEATURE_COLUMNS
+from src.python.train_model import ISO_FOREST_FEATURE_COLUMNS, NUMERIC_FEATURE_COLUMNS
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODELS_DIR = ROOT / "outputs" / "models"
@@ -148,7 +148,8 @@ def detect_fraud(req: TransactionRequest) -> FraudDetectionResponse:
         "txn_count_last_24h": cs.txn_count_last_24h,
     }
     numeric_vector = np.array([[feature_row[c] for c in NUMERIC_FEATURE_COLUMNS]], dtype=np.float64)
-    iso_score = -_state["iso_forest"].score_samples(numeric_vector)[0]
+    iso_vector = np.array([[feature_row[c] for c in ISO_FOREST_FEATURE_COLUMNS]], dtype=np.float64)
+    iso_score = -_state["iso_forest"].score_samples(iso_vector)[0]
     full_vector = np.concatenate([numeric_vector, np.array([[iso_score]])], axis=1)
 
     fraud_probability = float(_state["booster"].predict(full_vector)[0])

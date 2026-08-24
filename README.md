@@ -11,7 +11,7 @@
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.4%2B-F7931E?style=flat&logo=scikitlearn&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.11x-009688?style=flat&logo=fastapi&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.3x-FF4B4B?style=flat&logo=streamlit&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-45%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
+![Tests](https://img.shields.io/badge/tests-46%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
 ![Status](https://img.shields.io/badge/status-research%20%2F%20synthetic%20data-lightgrey?style=flat)
 
 A three-language fraud-detection engine for Chilean bank transactions,
@@ -21,7 +21,7 @@ a readable business-rules DSL (blacklists, high-risk countries, structuring
 patterns), and **Python** trains and serves an IsolationForest + LightGBM
 ensemble that consumes both other layers' outputs as features. One command
 (`make all`) builds, generates data, and trains everything; `make test` runs
-all 45 tests (11 C, 10 RSpec, 24 pytest) — every number below came from
+all 46 tests (11 C, 10 RSpec, 25 pytest) — every number below came from
 running that on this machine.
 
 ---
@@ -121,7 +121,7 @@ legal figure, and `UF_TO_CLP` is a fixed illustrative conversion, not a live
 indexed value. No real blacklist, merchant, or regulatory data is used
 anywhere in this project — see §9.
 
-# 5. A Real Bug Found and Fixed While Validating This
+# 5. Two Real Bugs Found and Fixed While Validating This
 
 `BLACKLISTED_MERCHANT_IDS` originally included `MER_00013` — which, it
 turned out, fell *inside* the legit merchant pool's ID range
@@ -140,6 +140,32 @@ blacklisted IDs) and retraining brought `blacklisted_merchant` recall to
 100% and overall F1 to 0.995 — see `tests/python/test_generate_data.py::test_blacklisted_merchant_ids_never_collide_with_legit_pool`
 for the regression test this became.
 
+**Second bug, more architectural**: after fixing the above, the metrics
+looked strong (F1 0.995), but that alone doesn't prove LightGBM was
+actually combining all three layers as designed — it could just as easily
+be routing around one of them. Checking `booster.feature_importance()`
+directly showed exactly that: `isolation_forest_score` carried **82.5%**
+of LightGBM's total gain, `amount_clp` another 15.1%, and every Ruby/C-derived
+signal was nearly invisible (`rules_risk_score` 0.4%, `rules_flagged` and
+`is_blacklisted_merchant` ~0%, `velocity_score` 1.0%). The root cause:
+`IsolationForest` was being trained on *all* 14 features, including Ruby's
+crisp, near-deterministic rule flags — so it trivially learned
+"`is_blacklisted_merchant == 1` → anomalous" and its own score became a
+proxy that absorbed the Ruby layer's signal almost entirely. LightGBM then
+just leaned on that one proxy feature instead of genuinely weighing the two
+layers, which is not what the architecture in §3 claims to do. Fixed by
+introducing `ISO_FOREST_FEATURE_COLUMNS` (`src/python/train_model.py`): a
+narrower feature set for IsolationForest containing only continuous/
+behavioral signals (amounts, distances, speeds, counts), excluding every
+crisp rule-engine flag. After retraining, `rules_risk_score` alone jumped
+to **44.0%** of LightGBM's gain and `isolation_forest_score` dropped to
+0.1% — LightGBM is now demonstrably relying on Ruby's output directly
+rather than through an opaque intermediary, which is what the three-layer
+design is supposed to demonstrate. (Test-set metrics also improved to a
+perfect 1.000/1.000/1.000 precision/recall/F1, though that's a side effect
+of the fix, not its point — the point was making the layer integration
+real and inspectable, not just numerically strong.)
+
 # 6. Results (Real Numbers From One Real Run)
 
 `make all` on this machine (seed 42, reproducible from a clean clone):
@@ -149,12 +175,12 @@ the four archetypes), 3,000 customers, time-based split (train 35,000 / val
 
 | Metric | Value (test split) |
 |---|---|
-| Precision | 0.982 |
+| Precision | 1.000 |
 | Recall | **1.000** (110/110 fraud caught) |
-| F1 | 0.991 |
+| F1 | 1.000 |
 | ROC-AUC | 1.000 |
-| PR-AUC | 0.99999... |
-| False positives | 2 (out of 7,390 legit transactions) |
+| PR-AUC | 1.000 |
+| False positives | 0 (out of 7,390 legit transactions) |
 
 Recall by fraud archetype on the test split, after the fix in §5:
 `velocity_burst` 35/35, `blacklisted_merchant` 43/43, `high_risk_country`
@@ -165,11 +191,11 @@ Recall by fraud archetype on the test split, after the fix in §5:
 | Layer | Measured cost | How |
 |---|---|---|
 | C module, pure C benchmark | **45.5 ns/call** | `src/c/bench_main.c`, 2,000,000 iterations, `make bench-c` |
-| C module via `ctypes` from Python | p50 0.0020ms, p95 0.0021ms | 2,000 calls, in-process |
+| C module via `ctypes` from Python | p50 0.0019ms, p95 0.0020ms | 2,000 calls, in-process |
 | Ruby rules engine round-trip (persistent subprocess) | p50 0.070ms, p95 0.092ms, max 0.237ms | 300 calls over stdin/stdout JSON |
 | IsolationForest `score_samples()`, single row | ~1.8ms | dominant cost in the full pipeline — see below |
 | LightGBM `predict()`, single row | p50 0.064ms, p95 0.112ms | |
-| **Full `/detect-fraud` request** (all layers + FastAPI) | **p50 4.22ms, p95 4.80ms, max 5.58ms** | 200 requests via FastAPI `TestClient` |
+| **Full `/detect-fraud` request** (all layers + FastAPI) | **p50 4.19ms, p95 5.51ms, max 6.23ms** | 200 requests via FastAPI `TestClient` |
 
 **Honest finding**: the brief's "< 1ms" target is real and met — for the C
 module specifically, at 45.5 nanoseconds per call, four orders of magnitude
@@ -246,7 +272,7 @@ pip install -r requirements.txt
 # Build the C library, install Ruby gems, generate data, train everything
 make all
 
-# Run all 45 tests across all three languages
+# Run all 46 tests across all three languages
 make test
 
 # Serve the real-time scoring API (combines C + Ruby + Python per request)

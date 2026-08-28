@@ -18,7 +18,8 @@ from contextlib import asynccontextmanager
 import joblib
 import lightgbm as lgb
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field
 
 from src.python.bridge import CVelocityEngine, RubyRulesEngine
@@ -27,6 +28,34 @@ from src.python.train_model import ISO_FOREST_FEATURE_COLUMNS, NUMERIC_FEATURE_C
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODELS_DIR = ROOT / "outputs" / "models"
+
+# Observabilidad Prometheus: cada etapa polyglot del pipeline (C, Ruby,
+# Python/LightGBM) queda instrumentada por separado -- no solo la latencia
+# total -- para que un dashboard de Grafana pueda mostrar cual capa domina
+# la latencia p99 en vivo, la misma pregunta que este repo ya respondio una
+# vez a mano (ver README: el cuello de botella real es IsolationForest.
+# score_samples, no las llamadas cruzadas de lenguaje) pero ahora medible
+# de forma continua en produccion, no solo en un benchmark puntual.
+REQUESTS_TOTAL = Counter(
+    "fraud_requests_total", "Transacciones procesadas por /detect-fraud", ["result"]
+)
+TOTAL_LATENCY = Histogram(
+    "fraud_detect_latency_seconds", "Latencia total de /detect-fraud (todas las capas)"
+)
+C_LAYER_LATENCY = Histogram(
+    "fraud_c_layer_latency_seconds", "Latencia de compute_velocity_metrics (capa C)"
+)
+RUBY_LAYER_LATENCY = Histogram(
+    "fraud_rules_layer_latency_seconds", "Latencia del motor de reglas Ruby (pipe subprocess)"
+)
+ML_LAYER_LATENCY = Histogram(
+    "fraud_ml_layer_latency_seconds", "Latencia de IsolationForest + LightGBM"
+)
+FRAUD_PROBABILITY = Histogram(
+    "fraud_probability_score",
+    "Distribucion de fraud_probability emitida",
+    buckets=(0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0),
+)
 
 _state: dict = {}
 
@@ -103,12 +132,18 @@ def health():
     return {"status": "ok" if _state else "loading"}
 
 
+@app.get("/metrics")
+def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.post("/detect-fraud", response_model=FraudDetectionResponse)
 def detect_fraud(req: TransactionRequest) -> FraudDetectionResponse:
     start = time.perf_counter()
     cs = req.customer_state
 
     has_prev = cs.last_latitude is not None and cs.last_longitude is not None
+    c_start = time.perf_counter()
     c_metrics = _state["c_engine"].compute(
         current_lat=req.latitude,
         current_lon=req.longitude,
@@ -121,7 +156,9 @@ def detect_fraud(req: TransactionRequest) -> FraudDetectionResponse:
         txn_count_last_1h=cs.txn_count_last_1h,
         txn_count_last_24h=cs.txn_count_last_24h,
     )
+    C_LAYER_LATENCY.observe(time.perf_counter() - c_start)
 
+    ruby_start = time.perf_counter()
     ruby_verdict = _state["rules_engine"].evaluate({
         "amount_clp": req.amount_clp,
         "merchant_id": req.merchant_id,
@@ -130,6 +167,7 @@ def detect_fraud(req: TransactionRequest) -> FraudDetectionResponse:
         "txn_count_last_24h": cs.txn_count_last_24h,
         "is_impossible_travel": c_metrics["is_impossible_travel"],
     })
+    RUBY_LAYER_LATENCY.observe(time.perf_counter() - ruby_start)
 
     feature_row = {
         "amount_clp": req.amount_clp,
@@ -147,20 +185,27 @@ def detect_fraud(req: TransactionRequest) -> FraudDetectionResponse:
         "txn_count_last_1h": cs.txn_count_last_1h,
         "txn_count_last_24h": cs.txn_count_last_24h,
     }
+    ml_start = time.perf_counter()
     numeric_vector = np.array([[feature_row[c] for c in NUMERIC_FEATURE_COLUMNS]], dtype=np.float64)
     iso_vector = np.array([[feature_row[c] for c in ISO_FOREST_FEATURE_COLUMNS]], dtype=np.float64)
     iso_score = -_state["iso_forest"].score_samples(iso_vector)[0]
     full_vector = np.concatenate([numeric_vector, np.array([[iso_score]])], axis=1)
 
     fraud_probability = float(_state["booster"].predict(full_vector)[0])
+    ML_LAYER_LATENCY.observe(time.perf_counter() - ml_start)
     threshold = _state["metadata"]["decision_threshold"]
+    is_fraud = fraud_probability >= threshold
 
     elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+    TOTAL_LATENCY.observe(elapsed_ms / 1000.0)
+    FRAUD_PROBABILITY.observe(fraud_probability)
+    REQUESTS_TOTAL.labels(result="fraud" if is_fraud else "legit").inc()
 
     return FraudDetectionResponse(
         transaction_id=req.transaction_id,
         fraud_probability=fraud_probability,
-        is_fraud=fraud_probability >= threshold,
+        is_fraud=is_fraud,
         decision_threshold=threshold,
         c_layer=c_metrics,
         ruby_layer=ruby_verdict,

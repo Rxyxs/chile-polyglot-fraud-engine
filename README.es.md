@@ -10,20 +10,25 @@
 ![LightGBM](https://img.shields.io/badge/LightGBM-4.x-02569B?style=flat)
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.4%2B-F7931E?style=flat&logo=scikitlearn&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.11x-009688?style=flat&logo=fastapi&logoColor=white)
+![Prometheus](https://img.shields.io/badge/Prometheus-metricas-E6522C?style=flat&logo=prometheus&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-dashboard-F46800?style=flat&logo=grafana&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.3x-FF4B4B?style=flat&logo=streamlit&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-46%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
+![Tests](https://img.shields.io/badge/tests-51%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
 ![Status](https://img.shields.io/badge/status-research%20%2F%20datos%20sinteticos-lightgrey?style=flat)
 
 Un motor de deteccion de fraude en tres lenguajes para transacciones
 bancarias chilenas, donde cada lenguaje hace el trabajo para el que
 realmente es mejor: **C** calcula metricas de velocidad/geolocalizacion de
-forma nativa en nanosegundos, **Ruby** evalua un DSL de reglas de negocio
-legible (listas negras, paises de alto riesgo, patrones de estructuracion),
-y **Python** entrena y sirve un ensemble IsolationForest + LightGBM que
-consume las salidas de las otras dos capas como atributos. Un solo comando
-(`make all`) compila, genera los datos y entrena todo; `make test` ejecuta
-los 46 tests (11 en C, 10 RSpec, 25 pytest) — cada numero de este README
-proviene de ejecutar eso en esta maquina.
+forma nativa en nanosegundos (servidas de dos formas -- en el mismo proceso
+via `ctypes`, y fuera de proceso como un **Feature Store** independiente
+sobre un **canal IPC de memoria compartida (mmap)**), **Ruby** evalua un
+DSL de reglas de negocio legible sobre un pipe de subproceso persistente, y
+**Python** entrena y sirve un ensemble IsolationForest + LightGBM que
+consume las salidas de las otras dos capas como atributos, instrumentado de
+punta a punta con metricas **Prometheus** y un dashboard **Grafana**. Un
+solo comando (`make all`) compila, genera los datos y entrena todo;
+`make test` ejecuta los 51 tests (11 en C, 10 RSpec, 30 pytest) — cada
+numero de este README proviene de ejecutar eso en esta maquina.
 
 ---
 
@@ -67,16 +72,18 @@ directamente, no para simularlo:
 Transaccion
    |
    v
-src/python/api.py -- FastAPI /detect-fraud
-   |
-   |---> [C]    src/c/fraud_core.c
-   |            llamado en el mismo proceso via ctypes, ~2 microseg/llamada
-   |            -> distancia haversine, velocidad de viaje imposible,
-   |               z-score de monto, velocity_score
+src/python/api.py -- FastAPI /detect-fraud   -----> /metrics (Prometheus)
+   |                                                    |
+   |---> [C]    src/c/fraud_core.c                      v
+   |            llamado en el mismo proceso via   Dashboard Grafana
+   |            ctypes, ~2 microseg/llamada       (observability/grafana/dashboard.json):
+   |            -> distancia haversine,            req/s, latencia p50/p95/p99,
+   |               velocidad de viaje imposible,   p99 POR CAPA (cual domina,
+   |               z-score de monto, velocity_score en vivo)
    |
    |---> [Ruby] src/ruby/rules_engine.rb
    |            subproceso `--server` persistente, JSON por linea
-   |            sobre stdin/stdout, ~0,07ms/llamada
+   |            sobre stdin/stdout, ~66us/llamada
    |            -> comercio en lista negra, pais de alto riesgo,
    |               patron de estructuracion, regla de rafaga de velocidad
    |
@@ -96,7 +103,32 @@ src/python/api.py -- FastAPI /detect-fraud
    v
 fraud_probability, is_fraud
 (+ desglose completo: c_layer, ruby_layer -- ver FraudDetectionResponse)
+
+
+Por separado -- una ruta IPC genuinamente distinta, no usada por la API de arriba:
+
+src/python/mmap_feature_store_client.py
+   |  IPC de memoria compartida (Windows CreateFileMapping/MapViewOfFile),
+   |  handshake de 3 estados con busy-wait, cero serializacion por llamada
+   v
+src/c/feature_store_server.c  (proceso independiente, "el Feature Store")
+   |  reutiliza compute_velocity_metrics de fraud_core.c -- mismo C,
+   v  un transporte distinto
+VelocityMetrics, escrito de vuelta al canal compartido
 ```
+
+## 3.1 Tres transportes, tres perfiles de latencia reales
+
+`src/python/benchmark_throughput.py` mide -- no asume -- el
+throughput/latencia de los tres mecanismos entre lenguajes de este
+repositorio, corridos uno tras otro en el mismo proceso contra un servidor
+real y corriendo para cada uno: `CVelocityEngine` (llamada DLL `ctypes` en
+el mismo proceso), el nuevo `MmapFeatureStoreClient` (IPC de memoria
+compartida contra `feature_store_server.exe`), y `RubyRulesEngine` (pipe de
+subproceso, JSON sobre stdin/stdout). Ver §6.1 para los numeros reales de
+una corrida real -- incluido el levemente contraintuitivo (la IPC de
+memoria compartida superando a la llamada DLL en el mismo proceso),
+explicado ahi, no solo afirmado.
 
 `src/app/dashboard.py` (Streamlit) reproduce el split de prueba retenido,
 desglosando que capa realmente detecto cada arquetipo de fraude.
@@ -128,7 +160,7 @@ fija, no un valor indexado en vivo. No se usa ninguna lista negra,
 comercio, ni dato regulatorio real en ningun lugar de este proyecto — ver
 §9.
 
-# 5. Dos Bugs Reales Encontrados y Corregidos al Validar Esto
+# 5. Tres Bugs Reales Encontrados y Corregidos al Validar Esto
 
 `BLACKLISTED_MERCHANT_IDS` originalmente incluia `MER_00013` — que,
 resulto, caia *dentro* del rango de IDs del pool de comercios legitimos
@@ -179,6 +211,31 @@ tambien mejoraron a un precision/recall/F1 perfecto de 1,000/1,000/1,000,
 aunque eso es un efecto secundario de la correccion, no su objetivo — el
 objetivo era hacer real e inspeccionable la integracion entre capas, no
 solo numericamente fuerte.)
+
+**Tercer bug, en el nuevo Feature Store de memoria compartida**: la primera
+version del struct del canal en `feature_store_server.c` usaba
+`#pragma pack(push, 1)` para forzar empaquetado byte a byte, y el
+`ctypes.Structure` de Python correspondiente usaba `_pack_ = 1` para
+espejarlo — se veia razonable de ambos lados, y compilaba y enlazaba bien.
+Al correrlo, produjo basura: cada campo volvia como un patron de bits de
+double denormalizado (`5e-324`, `3.3e-05`) en vez de valores reales. La
+causa: `#pragma pack` solo controla como se ordenan los propios miembros de
+un struct entre si — **no** reempaqueta retroactivamente
+`TransactionContext`/`VelocityMetrics`, que ya estan definidos con
+alineacion natural en `fraud_core.h` para el puente DLL `ctypes`
+*existente*, que funciona. Empaquetar el struct del canal externo a 1 byte
+mientras sus dos miembros anidados mantenian su tamaño de alineacion
+natural solo significo que ambos lados quedaron en desacuerdo sobre el
+tamaño total del struct (128 bytes vs. el calculo empaquetado) y el offset
+de cada campo. Detectado de inmediato comparando la salida de
+`MmapFeatureStoreClient` contra la de `CVelocityEngine` para el mismo input
+(ahora la aserción central de `tests/python/test_mmap_feature_store.py`) —
+no leyendo el codigo, que se veia correcto en ambos lados por separado.
+Corregido eliminando el pragma por completo y calzando alineacion natural
+en ambos lados, reutilizando las clases ctypes
+`TransactionContext`/`VelocityMetrics` existentes de `bridge.py`
+directamente en vez de redefinirlas una segunda vez con un empaquetado
+distinto.
 
 # 6. Resultados (Numeros Reales de una Ejecucion Real)
 
@@ -282,6 +339,72 @@ configuraciones). Un despliegue de produccion que persiga latencia de
 punta a punta sub-milisegundo reemplazaria o agruparia (batch) este paso;
 este repositorio reporta el trade-off en vez de ocultarlo.
 
+## 6.1 Stress test de throughput — `make bench-throughput` (objetivo: > 10.000 req/s)
+
+Un solo hilo, sincrono, llamadas seguidas en el mismo proceso Python contra
+un servidor real corriendo para cada transporte —
+`src/python/benchmark_throughput.py`, 50.000 iteraciones (5.000 para Ruby,
+cuyo costo por llamada es ~30-40x el de las rutas C, para mantener la
+corrida bajo un segundo):
+
+| # | Mecanismo | Throughput | Latencia p50 | Latencia p99 |
+|---|---|---:|---:|---:|
+| 1 | `CVelocityEngine` (llamada DLL `ctypes`, en el mismo proceso) | 467.914 req/s | 2,0us | 2,5us |
+| 2 | `MmapFeatureStoreClient` (IPC de memoria compartida, proceso separado) | **549.731 req/s** | 1,7us | 1,9us |
+| 3 | `RubyRulesEngine` (pipe de subproceso, JSON sobre stdin/stdout) | 14.216 req/s | 66,8us | 90,8us |
+
+Los tres superan comodamente el objetivo de 10.000 req/s — incluido el
+transporte por pipe, pese a ser ~30x mas lento por llamada que las dos
+rutas en C.
+
+**Hallazgo honesto, levemente contraintuitivo**: la ruta IPC de memoria
+compartida fuera de proceso (#2) es medible y notoriamente mas rapida que la
+llamada `ctypes` en el mismo proceso (#1), no mas lenta — lo cual no es la
+expectativa ingenua ("IPC tiene overhead, en el mismo proceso no"). La
+razon probable, visible en el codigo, no solo afirmada: cada llamada
+`ctypes` paga el costo de marshalling de argumentos de Python para una
+*llamada a funcion* a traves del limite FFI (`ctypes.byref`, coercion de
+tipos de argumento, un dispatch `CFUNCTYPE`), mientras que la ruta mmap es
+asignacion directa de campos en un `ctypes.Structure` ya superpuesto sobre
+memoria compartida — sin ningun marshalling de llamada a funcion, solo
+escrituras de memoria en las que el sistema operativo nunca tiene que
+intervenir. Este es un resultado real de este patron de acceso especifico
+(un solo hilo, loop ajustado, misma maquina) y no deberia leerse como "la
+memoria compartida le gana a FFI en general" — una carga genuinamente
+concurrente y multi-cliente (que este servidor de un solo canal
+explicitamente no soporta — ver §3.1 y el docstring de
+`feature_store_server.c`) muy plausiblemente invertiria la comparacion por
+contencion sobre el unico canal compartido.
+
+## 6.2 Observabilidad: Prometheus + Grafana
+
+`src/python/api.py` expone `/metrics` (formato de texto Prometheus) con
+cinco instrumentos: `fraud_requests_total{result}` (contador),
+`fraud_detect_latency_seconds` (histograma de punta a punta), y un
+histograma *por capa* — `fraud_c_layer_latency_seconds`,
+`fraud_rules_layer_latency_seconds`, `fraud_ml_layer_latency_seconds` —
+mas la distribucion de `fraud_probability_score`. El desglose por capa
+responde, de forma continua y en produccion, exactamente la pregunta que
+la tabla de latencia de arriba responde con una corrida de benchmark
+puntual: *cual capa domina el p99 ahora mismo*.
+
+`observability/` tiene un `docker-compose.yml` listo (Prometheus scrapeando
+`/metrics` + un dashboard de Grafana provisionado,
+`observability/grafana/dashboard.json`, con un panel por cada metrica de
+arriba, incluida la comparacion de p99 por capa).
+`tests/python/test_api.py::test_metrics_endpoint_reflects_real_requests`
+confirma que una llamada real a `/detect-fraud` efectivamente incrementa
+estas metricas — las metricas en si estan verificadas.
+
+**Nota honesta, mismo estandar que el patron de Dockerfile usado en otras
+partes de este portafolio**: el stack `docker-compose.yml` se escribio y
+revisio cuidadosamente (imagenes oficiales, layout de provisioning estandar
+de Grafana, un JSON de dashboard valido — verificado parseandolo) pero no
+se corrio con un `docker compose up` real, ya que Docker no esta instalado
+en la maquina donde se construyo este repositorio. Lo que *si* se verifico
+es todo lo que esta aguas arriba: las metricas son reales, estan
+correctamente conectadas, y se confirmo que cambian con trafico real.
+
 ![Curva Precision-Recall](outputs/plots/precision_recall_curve.png)
 ![Matriz de Confusion](outputs/plots/confusion_matrix.png)
 ![Importancia de Atributos](outputs/plots/feature_importance.png)
@@ -342,23 +465,31 @@ chile-polyglot-fraud-engine/
 │   └── processed/              # features.parquet de ingenieria de atributos (en .gitignore)
 ├── src/
 │   ├── c/
-│   │   ├── fraud_core.h/.c     # metricas de velocidad/geo, compilado a fraud_core.dll
-│   │   ├── bench_main.c        # valida < 1ms/llamada
-│   │   ├── build.ps1           # build con MSVC (vcvars64 + cl)
-│   │   └── Makefile            # build | test | bench | clean
+│   │   ├── fraud_core.h/.c            # metricas de velocidad/geo, compilado a fraud_core.dll
+│   │   ├── bench_main.c               # valida < 1ms/llamada
+│   │   ├── feature_store_server.c     # Feature Store standalone, IPC de memoria compartida
+│   │   ├── build.ps1                  # build con MSVC (vcvars64 + cl)
+│   │   ├── run_bench_throughput.ps1   # levanta feature_store_server.exe, corre el stress test, lo apaga
+│   │   └── Makefile                   # build | test | bench | clean
 │   ├── ruby/
 │   │   ├── rules_engine.rb     # DSL RuleSet + modo --server stdin/stdout
 │   │   └── Gemfile
 │   ├── python/
-│   │   ├── generate_data.py    # transacciones bancarias chilenas sinteticas, 4 arquetipos de fraude
-│   │   ├── bridge.py            # puente ctypes (C) + puente de subproceso persistente (Ruby)
-│   │   ├── train_model.py       # construccion de atributos + IsolationForest + LightGBM
-│   │   └── api.py               # FastAPI /detect-fraud, combina las 3 capas
+│   │   ├── generate_data.py             # transacciones bancarias chilenas sinteticas, 4 arquetipos de fraude
+│   │   ├── bridge.py                    # puente ctypes (C) + puente de subproceso persistente (Ruby)
+│   │   ├── mmap_feature_store_client.py # cliente IPC de memoria compartida para feature_store_server.exe
+│   │   ├── benchmark_throughput.py      # stress test: req/s para los 3 mecanismos IPC/FFI
+│   │   ├── train_model.py               # construccion de atributos + IsolationForest + LightGBM
+│   │   └── api.py                       # FastAPI /detect-fraud + /metrics, combina las 3 capas
 │   └── app/dashboard.py         # Streamlit: atribucion por capa, replay en vivo, mapa
+├── observability/
+│   ├── docker-compose.yml       # Prometheus + Grafana (ver §6.2 -- no verificado con docker build)
+│   ├── prometheus.yml           # config de scrape para /metrics
+│   └── grafana/                 # datasource + provisioning de dashboard, dashboard.json
 ├── tests/
 │   ├── c/test_fraud_core.c      # harness basado en asserts, compilado por src/c/build.ps1
 │   ├── ruby/rules_engine_spec.rb
-│   └── python/                  # bridge, generate_data, train_model, api, latencia
+│   └── python/                  # bridge, generate_data, train_model, api, latencia, feature store mmap
 ├── outputs/
 │   ├── models/       # DLL/exe compilados + artefactos entrenados (en .gitignore, `make all` regenera)
 │   ├── plots/        # curva PR, matriz de confusion, importancia de atributos (versionados)
@@ -376,31 +507,41 @@ Requiere: **MSVC** (Visual Studio Build Tools o Visual Studio con el
 workload "Desktop development with C++") para la capa C; **Ruby 3.2+** con
 Bundler; **Python 3.10+** (el codigo usa sintaxis de union PEP 604
 `str | None` de forma nativa, por lo que 3.10 es un piso real); **GNU
-Make** (en Windows, ej. `winget install ezwinports.make`).
+Make** (en Windows, ej. `winget install ezwinports.make`); **Docker** solo
+si quieres correr de verdad el stack de Prometheus/Grafana en
+`observability/` (opcional — todo lo demas funciona sin el).
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 
-# Compila la biblioteca C, instala gemas Ruby, genera datos y entrena todo
+# Compila la biblioteca C (incl. feature_store_server.exe), instala gemas
+# Ruby, genera datos y entrena todo
 make all
 
-# Ejecuta los 46 tests en los tres lenguajes
+# Ejecuta los 51 tests en los tres lenguajes
 make test
 
 # Levanta la API de scoring en tiempo real (combina C + Ruby + Python por solicitud)
 make run-api
 # luego: POST http://localhost:8000/detect-fraud
+# y:     GET  http://localhost:8000/metrics  (Prometheus)
+
+# Stress test de los 3 mecanismos IPC/FFI (levanta/apaga feature_store_server.exe solo)
+make bench-throughput
 
 # Levanta el dashboard de monitoreo
 make run-dashboard
+
+# Prometheus + Grafana (requiere `make run-api` corriendo antes; ver la nota honesta en §6.2)
+make observability-up
 ```
 
 Targets individuales: `make build-c`, `make test-c`, `make bench-c`,
 `make install-ruby`, `make test-ruby`, `make generate-data`, `make train`,
-`make test-python`, `make clean`. Ejecuta `make help` para la lista
-completa.
+`make test-python`, `make run-feature-store`, `make clean`. Ejecuta
+`make help` para la lista completa.
 
 # 10. Descargo de Responsabilidad
 

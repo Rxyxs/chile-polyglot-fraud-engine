@@ -1,0 +1,11 @@
+# Scrape config para el /metrics de la API FastAPI (src/python/api.py).
+# `host.docker.internal` resuelve al host desde dentro del contenedor de
+# Prometheus en Docker Desktop (Windows/Mac) -- en Linux nativo, reemplazar
+# por la IP del host o correr uvicorn en la misma red Docker.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: "chile-polyglot-fraud-engine"
+    static_configs:
+      - targets: ["host.docker.internal:8000"]

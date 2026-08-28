@@ -77,3 +77,19 @@ def test_detect_fraud_rejects_nonpositive_amount(client):
     bad = {**LEGIT_PAYLOAD, "amount_clp": -100}
     r = client.post("/detect-fraud", json=bad)
     assert r.status_code == 422
+
+
+def test_metrics_endpoint_reflects_real_requests(client):
+    # No solo "el endpoint responde 200" -- verifica que un request real a
+    # /detect-fraud efectivamente incremento los contadores/histogramas de
+    # Prometheus, no solo que existen declarados en el codigo.
+    before = client.get("/metrics").text
+    client.post("/detect-fraud", json=LEGIT_PAYLOAD)
+    after = client.get("/metrics").text
+
+    assert "fraud_requests_total" in after
+    assert "fraud_c_layer_latency_seconds" in after
+    assert "fraud_rules_layer_latency_seconds" in after
+    assert "fraud_ml_layer_latency_seconds" in after
+    assert "fraud_probability_score" in after
+    assert before != after

@@ -1,0 +1,70 @@
+{
+  "title": "Chile Polyglot Fraud Engine",
+  "uid": "polyglot-fraud-engine",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Throughput (req/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(fraud_requests_total[1m]))",
+          "legendFormat": "requests/s"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Fraude vs. Legitimo (por resultado)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(fraud_requests_total[1m])) by (result)",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Latencia total: p50 / p95 / p99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(fraud_detect_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(fraud_detect_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(fraud_detect_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "title": "Latencia p99 por capa (C vs Ruby vs ML) -- que capa domina",
+      "description": "Responde en vivo la misma pregunta que el README de este repo ya respondio una vez a mano con un benchmark puntual: cual capa domina la latencia p99 del pipeline. No asumido -- medido continuamente.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum(rate(fraud_c_layer_latency_seconds_bucket[1m])) by (le))", "legendFormat": "C (velocity engine)" },
+        { "expr": "histogram_quantile(0.99, sum(rate(fraud_rules_layer_latency_seconds_bucket[1m])) by (le))", "legendFormat": "Ruby (rules engine)" },
+        { "expr": "histogram_quantile(0.99, sum(rate(fraud_ml_layer_latency_seconds_bucket[1m])) by (le))", "legendFormat": "Python (IsolationForest + LightGBM)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "title": "Distribucion de fraud_probability",
+      "type": "heatmap",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "sum(rate(fraud_probability_score_bucket[1m])) by (le)", "format": "heatmap", "legendFormat": "{{le}}" }
+      ]
+    }
+  ]
+}

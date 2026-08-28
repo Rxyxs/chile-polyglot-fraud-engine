@@ -1,0 +1,41 @@
+# Prometheus + Grafana para observabilidad de la API FastAPI (src/python/api.py).
+# La API corre fuera de este compose (uvicorn en el host, `make run-api`) --
+# Prometheus la scrapea via host.docker.internal:8000/metrics (ver prometheus.yml).
+#
+# Uso:
+#   1. make run-api                              (deja /metrics sirviendo en :8000)
+#   2. docker compose -f observability/docker-compose.yml up
+#   3. Prometheus: http://localhost:9090  --  Grafana: http://localhost:3000 (admin/admin)
+#
+# NOTA HONESTA: este docker-compose se escribio y revisio cuidadosamente
+# (imagenes oficiales, provisioning de datasource/dashboard estandar de
+# Grafana) pero no se ejecuto con un `docker compose up` real -- Docker no
+# esta instalado en la maquina donde se construyo este repositorio. El
+# resto de la observabilidad (las metricas de Prometheus en si, expuestas
+# por /metrics) SI se verifico -- ver test_metrics_endpoint_reflects_real_requests
+# en tests/python/test_api.py, que confirma que un request real incrementa
+# los contadores. Esta pieza especifica (el stack de visualizacion) no.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    depends_on:
+      - prometheus
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./grafana/dashboard-provisioning.yml:/etc/grafana/provisioning/dashboards/dashboard-provisioning.yml:ro
+      - ./grafana/dashboard.json:/var/lib/grafana/dashboards/fraud-engine.json:ro
+    ports:
+      - "3000:3000"

@@ -66,7 +66,33 @@ directamente, no para simularlo:
    suficientemente rapido para producción" es el contenido de ingenieria
    real aqui, no una nota al pie.
 
+# 2.1 Impacto de Negocio e Indicadores Clave (KPIs)
+
+| Métrica | Resultado | Qué significa |
+|---|---|---|
+| Recall de fraude (test split) | 110/110 (100%) | Cada arquetipo de fraude capturado, 0 falsos positivos en 7.390 transacciones legítimas |
+| Latencia del hot-path en C | ~2 µs/llamada | Scoring en tiempo real viable a alto volumen de transacciones |
+| Throughput del feature store mmap | ~550.000 req/s | El más rápido de los 3 mecanismos IPC/FFI medidos -- supera incluso a la llamada ctypes en el mismo proceso |
+| Throughput del motor de reglas Ruby | ~14.000-15.000 req/s | La capa más lenta, identificada correctamente vía paneles de latencia por capa en Prometheus/Grafana |
+| Cobertura de tests | 51/51 pasando | C (11), Ruby (10), Python (30) -- los tres lenguajes, un solo `make test` |
+| Observabilidad | Dashboard p99-por-capa en vivo | Grafana responde "qué capa domina la latencia de cola" continuamente, no solo vía un benchmark puntual |
+
 # 3. Arquitectura
+
+```mermaid
+flowchart TB
+    TX[Transaccion] --> API[FastAPI /detect-fraud]
+    API --> C["C: fraud_core.c<br/>ctypes, ~2µs/llamada<br/>features velocidad/geo"]
+    API --> RB["Ruby: rules_engine.rb<br/>pipe subprocess, ~66µs/llamada<br/>reglas blacklist/structuring/velocidad"]
+    C --> ML["Python: IsolationForest → LightGBM<br/>pondera señales de C + Ruby"]
+    RB --> ML
+    ML --> OUT[(fraud_probability, is_fraud)]
+    API --> METRICS[/metrics Prometheus/] --> GRAFANA[[Dashboard Grafana]]
+
+    FSC[feature_store_server.c] -.memoria compartida mmap,<br/>sin serializacion.-> PYCLIENT[mmap_feature_store_client.py]
+```
+
+Diagrama completo a nivel de transporte (tres perfiles de latencia reales, no mostrados arriba):
 
 ```
 Transaccion

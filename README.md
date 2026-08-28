@@ -61,7 +61,33 @@ simulate it:
    difference between "correct" and "correct AND fast enough to ship" is
    the actual engineering content here, not a footnote.
 
+# 2.1 Business Impact & Key Performance Indicators
+
+| Metric | Result | What it means |
+|---|---|---|
+| Fraud recall (test split) | 110/110 (100%) | Every fraud archetype caught, 0 false positives on 7,390 legit transactions |
+| C hot-path latency | ~2 µs/call | Real-time scoring feasible at high transaction volume |
+| Mmap feature-store throughput | ~550,000 req/s | Fastest of 3 measured IPC/FFI paths — beats even the in-process ctypes call |
+| Ruby rules-engine throughput | ~14,000-15,000 req/s | Slowest layer, correctly identified via per-layer Prometheus/Grafana latency panels |
+| Test coverage | 51/51 passing | C (11), Ruby (10), Python (30) — all three languages, one `make test` |
+| Observability | Live p99-per-layer dashboard | Grafana answers "which layer dominates tail latency" continuously, not just via a one-off benchmark |
+
 # 3. Architecture
+
+```mermaid
+flowchart TB
+    TX[Transaction] --> API[FastAPI /detect-fraud]
+    API --> C["C: fraud_core.c<br/>ctypes, ~2µs/call<br/>velocity/geo features"]
+    API --> RB["Ruby: rules_engine.rb<br/>subprocess pipe, ~66µs/call<br/>blacklist/structuring/velocity rules"]
+    C --> ML["Python: IsolationForest → LightGBM<br/>weighs C + Ruby signals"]
+    RB --> ML
+    ML --> OUT[(fraud_probability, is_fraud)]
+    API --> METRICS[/metrics Prometheus/] --> GRAFANA[[Grafana dashboard]]
+
+    FSC[feature_store_server.c] -.mmap shared memory,<br/>zero serialization.-> PYCLIENT[mmap_feature_store_client.py]
+```
+
+Full transport-level diagram (three real latency profiles, not shown above):
 
 ```
 Transaction

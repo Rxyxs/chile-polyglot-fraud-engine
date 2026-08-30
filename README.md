@@ -540,3 +540,7 @@ figures — consult official CMF/UAF sources for real compliance thresholds.
 # 11. License
 
 MIT — see [LICENSE](LICENSE) for the full text.
+
+# 12. Author
+
+**Pablo Reyes** — [github.com/Rxyxs](https://github.com/Rxyxs)

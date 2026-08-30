@@ -584,3 +584,7 @@ reales.
 # 11. Licencia
 
 MIT — ver [LICENSE](LICENSE) para el texto completo.
+
+# 12. Autor
+
+**Pablo Reyes** — [github.com/Rxyxs](https://github.com/Rxyxs)

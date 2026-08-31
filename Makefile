@@ -19,6 +19,7 @@ help:
 	@echo "  test-ruby          Run RSpec against the Ruby DSL"
 	@echo "  generate-data      Generate synthetic Chilean bank transactions"
 	@echo "  train              Build features (via C+Ruby) and train the ML layer"
+	@echo "  train-extra        Train Logistic Regression baseline + PyTorch MLP (Focal Loss, ReLU/GELU/Swish) and persist comparison to DuckDB"
 	@echo "  test-python        Run pytest (includes API + latency + mmap feature-store tests)"
 	@echo "  test               Run all three languages' test suites"
 	@echo "  all                build-c + install-ruby + generate-data + train"
@@ -49,6 +50,9 @@ generate-data:
 
 train: build-c
 	$(PYTHON) -m src.python.train_model
+
+train-extra: train
+	$(PYTHON) -m src.python.train_extra_models
 
 test-python:
 	$(PYTHON) -m pytest -v

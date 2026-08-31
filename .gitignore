@@ -31,8 +31,10 @@ data/raw/*.csv
 data/processed/*.parquet
 outputs/models/*.joblib
 outputs/models/*.txt
+outputs/models/*.pt
 outputs/models/metadata.json
 outputs/reports/*.json
+outputs/reports/*.duckdb
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !outputs/models/.gitkeep

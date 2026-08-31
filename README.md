@@ -9,11 +9,13 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat&logo=python&logoColor=white)
 ![LightGBM](https://img.shields.io/badge/LightGBM-4.x-02569B?style=flat)
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.4%2B-F7931E?style=flat&logo=scikitlearn&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?style=flat&logo=pytorch&logoColor=white)
+![DuckDB](https://img.shields.io/badge/DuckDB-0.10%2B-FFF000?style=flat&logo=duckdb&logoColor=black)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.11x-009688?style=flat&logo=fastapi&logoColor=white)
 ![Prometheus](https://img.shields.io/badge/Prometheus-metrics-E6522C?style=flat&logo=prometheus&logoColor=white)
 ![Grafana](https://img.shields.io/badge/Grafana-dashboard-F46800?style=flat&logo=grafana&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.3x-FF4B4B?style=flat&logo=streamlit&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-51%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
+![Tests](https://img.shields.io/badge/tests-60%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
 ![Status](https://img.shields.io/badge/status-research%20%2F%20synthetic%20data-lightgrey?style=flat)
 
 A three-language fraud-detection engine for Chilean bank transactions,
@@ -26,7 +28,7 @@ readable business-rules DSL over a persistent subprocess pipe, and
 consumes both other layers' outputs as features, instrumented end to end
 with **Prometheus** metrics and a **Grafana** dashboard. One command
 (`make all`) builds, generates data, and trains everything; `make test` runs
-all 51 tests (11 C, 10 RSpec, 30 pytest) — every number below came from
+all 60 tests (11 C, 10 RSpec, 39 pytest) — every number below came from
 running that on this machine.
 
 ---
@@ -69,7 +71,7 @@ simulate it:
 | C hot-path latency | ~2 µs/call | Real-time scoring feasible at high transaction volume |
 | Mmap feature-store throughput | ~550,000 req/s | Fastest of 3 measured IPC/FFI paths — beats even the in-process ctypes call |
 | Ruby rules-engine throughput | ~14,000-15,000 req/s | Slowest layer, correctly identified via per-layer Prometheus/Grafana latency panels |
-| Test coverage | 51/51 passing | C (11), Ruby (10), Python (30) — all three languages, one `make test` |
+| Test coverage | 60/60 passing | C (11), Ruby (10), Python (39) — all three languages, one `make test` |
 | Observability | Live p99-per-layer dashboard | Grafana answers "which layer dominates tail latency" continuously, not just via a one-off benchmark |
 
 # 3. Architecture
@@ -370,6 +372,57 @@ single-channel server explicitly doesn't support — see §3.1 and
 `feature_store_server.c`'s docstring) would very plausibly flip the
 comparison via contention on the one shared channel.
 
+## 6.1.1 Modeling Approach Comparison — `make train-extra`
+
+The production path is the two-stage IsolationForest + LightGBM ensemble
+described above, but §6's perfect score raises the obvious question: how
+much of that separation comes from the ensemble specifically, versus being
+recoverable by a much simpler model on the same engineered features?
+`src/python/train_extra_models.py` answers this by training two more
+supervised approaches on the **identical** feature matrix (including
+`isolation_forest_score`) and identical time-based split:
+
+1. **Logistic Regression** — an interpretable linear baseline (`scikit-learn`,
+   `class_weight="balanced"`).
+2. **PyTorch MLP + Focal Loss** — a small `64 -> 32 -> 1` network trained
+   three times, once per hidden-activation choice (ReLU, GELU, Swish/SiLU),
+   using Focal Loss (`alpha=0.25, gamma=2.0`) instead of plain BCE so the
+   1.5% fraud rate doesn't get drowned out by legit-majority gradient.
+
+| Model | Precision | Recall | F1 | ROC-AUC | PR-AUC |
+|---|---:|---:|---:|---:|---:|
+| Logistic Regression (baseline) | 0.791 | 0.927 | 0.854 | 0.997 | 0.949 |
+| PyTorch MLP + Focal Loss (ReLU) | 0.945 | 0.936 | 0.941 | 0.9995 | 0.983 |
+| PyTorch MLP + Focal Loss (GELU) | 0.945 | 0.936 | 0.941 | 0.9992 | 0.984 |
+| PyTorch MLP + Focal Loss (Swish) | 0.862 | 0.964 | 0.910 | 0.9993 | 0.982 |
+| **IsolationForest + LightGBM (production)** | **1.000** | **1.000** | **1.000** | **1.000** | **1.000** |
+
+*(test split, seed 42, one real run of `make train-extra` on this machine —
+see `outputs/reports/model_comparison.json` and
+`outputs/reports/model_comparison.duckdb` for the full numbers, including
+the per-activation validation-split comparison.)*
+
+![ROC curve comparison](outputs/plots/model_comparison_roc.png)
+![Activation comparison](outputs/plots/activation_comparison.png)
+
+**Reading this honestly**: the linear baseline already reaches 0.95+ PR-AUC
+— confirming most of §6's "why it's this clean" explanation (the
+engineered features, especially `rules_risk_score` and `velocity_score`,
+carry most of the separable signal on their own). The MLP variants close
+most of the remaining gap over logistic regression regardless of
+activation choice — GELU and Swish edge out ReLU on validation PR-AUC in
+this run, but the difference (≈0.001) is well inside noise for a
+three-way comparison at this dataset size, so no single activation should
+be read as reliably superior here. Only the two-stage ensemble reaches a
+perfect score, consistent with §6's explanation that it is a property of
+this synthetic dataset's near-deterministic fraud signatures combined
+with the bug fixes in §5, not evidence that tree ensembles are
+categorically better at this problem than a well-regularized neural net.
+Comparative metrics and per-row test-set predictions for all five models
+are persisted to `outputs/reports/model_comparison.duckdb`
+(`model_metrics` and `test_predictions` tables) for anyone who wants to
+query the comparison directly rather than re-read the JSON/README.
+
 ## 6.2 Observability: Prometheus + Grafana
 
 `src/python/api.py` exposes `/metrics` (Prometheus text format) with five
@@ -464,6 +517,7 @@ chile-polyglot-fraud-engine/
 │   │   ├── mmap_feature_store_client.py # shared-memory IPC client for feature_store_server.exe
 │   │   ├── benchmark_throughput.py      # stress test: req/s for all 3 IPC/FFI mechanisms
 │   │   ├── train_model.py               # feature building + IsolationForest + LightGBM
+│   │   ├── train_extra_models.py        # Logistic Regression baseline + PyTorch MLP (Focal Loss, ReLU/GELU/Swish) + DuckDB comparison
 │   │   └── api.py                       # FastAPI /detect-fraud + /metrics, combines all 3 layers
 │   └── app/dashboard.py         # Streamlit: layer-attribution, live replay, map
 ├── observability/
@@ -504,8 +558,12 @@ pip install -r requirements.txt
 # generate data, train everything
 make all
 
-# Run all 51 tests across all three languages
+# Run all 60 tests across all three languages
 make test
+
+# Optional: Logistic Regression baseline + PyTorch MLP (Focal Loss,
+# ReLU/GELU/Swish comparison), persisted to outputs/reports/model_comparison.duckdb
+make train-extra
 
 # Serve the real-time scoring API (combines C + Ruby + Python per request)
 make run-api

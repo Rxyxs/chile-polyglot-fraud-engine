@@ -46,8 +46,6 @@ outputs/reports/*.duckdb
 .DS_Store
 
 # Local AI-assistant config (not part of the published project)
-CLAUDE.md
-.claude/
 
 # Interactive Plotly dashboard: embeds the full Plotly.js bundle inline (~4-5MB),
 # which was making GitHub misdetect the repo's primary language as HTML instead

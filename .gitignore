@@ -44,3 +44,7 @@ outputs/reports/*.duckdb
 .vscode/
 .idea/
 .DS_Store
+
+# Local AI-assistant config (not part of the published project)
+CLAUDE.md
+.claude/

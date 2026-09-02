@@ -73,9 +73,9 @@ directamente, no para simularlo:
 | Métrica | Resultado | Qué significa |
 |---|---|---|
 | Recall de fraude (test split) | 110/110 (100%) | Cada arquetipo de fraude capturado, 0 falsos positivos en 7.390 transacciones legítimas |
-| Latencia del hot-path en C | ~2 µs/llamada | Scoring en tiempo real viable a alto volumen de transacciones |
-| Throughput del feature store mmap | ~550.000 req/s | El más rápido de los 3 mecanismos IPC/FFI medidos -- supera incluso a la llamada ctypes en el mismo proceso |
-| Throughput del motor de reglas Ruby | ~14.000-15.000 req/s | La capa más lenta, identificada correctamente vía paneles de latencia por capa en Prometheus/Grafana |
+| Latencia del hot-path en C | ~2 µs/llamada via ctypes, 31 ns en un loop C puro | Scoring en tiempo real viable a alto volumen de transacciones |
+| Throughput del feature store mmap | ~568.000 req/s | El más rápido de los 3 mecanismos IPC/FFI medidos -- supera incluso a la llamada ctypes en el mismo proceso |
+| Throughput del motor de reglas Ruby | ~12.000-14.000 req/s | La capa más lenta, identificada correctamente vía paneles de latencia por capa en Prometheus/Grafana |
 | Cobertura de tests | 60/60 pasando | C (11), Ruby (10), Python (39) -- los tres lenguajes, un solo `make test` |
 | Observabilidad | Dashboard p99-por-capa en vivo | Grafana responde "qué capa domina la latencia de cola" continuamente, no solo vía un benchmark puntual |
 
@@ -85,7 +85,7 @@ directamente, no para simularlo:
 flowchart TB
     TX[Transaccion] --> API[FastAPI /detect-fraud]
     API --> C["C: fraud_core.c<br/>ctypes, ~2µs/llamada<br/>features velocidad/geo"]
-    API --> RB["Ruby: rules_engine.rb<br/>pipe subprocess, ~66µs/llamada<br/>reglas blacklist/structuring/velocidad"]
+    API --> RB["Ruby: rules_engine.rb<br/>pipe subprocess, ~75µs/llamada<br/>reglas blacklist/structuring/velocidad"]
     C --> ML["Python: IsolationForest → LightGBM<br/>pondera señales de C + Ruby"]
     RB --> ML
     ML --> OUT[(fraud_probability, is_fraud)]
@@ -111,7 +111,7 @@ src/python/api.py -- FastAPI /detect-fraud   -----> /metrics (Prometheus)
    |
    |---> [Ruby] src/ruby/rules_engine.rb
    |            subproceso `--server` persistente, JSON por linea
-   |            sobre stdin/stdout, ~66us/llamada
+   |            sobre stdin/stdout, ~75us/llamada
    |            -> comercio en lista negra, pais de alto riesgo,
    |               patron de estructuracion, regla de rafaga de velocidad
    |
@@ -340,18 +340,25 @@ decidida de antemano.
 
 | Capa | Costo medido | Como |
 |---|---|---|
-| Modulo C, benchmark en C puro | **45,5 ns/llamada** | `src/c/bench_main.c`, 2.000.000 iteraciones, `make bench-c` |
-| Modulo C via `ctypes` desde Python | p50 0,0019ms, p95 0,0020ms | 2.000 llamadas, en el mismo proceso |
-| Ida y vuelta del motor de reglas Ruby (subproceso persistente) | p50 0,070ms, p95 0,092ms, max 0,237ms | 300 llamadas sobre JSON por stdin/stdout |
+| Modulo C, benchmark en C puro | **31,0 ns/llamada** | `src/c/bench_main.c`, 2.000.000 iteraciones, `make bench-c` |
+| Modulo C via `ctypes` desde Python | p50 0,00180ms, p95 0,00220ms | 2.000 llamadas, en el mismo proceso (`tests/python/test_latency.py`) |
+| Ida y vuelta del motor de reglas Ruby (subproceso persistente) | p50 0,075ms, p99 0,213ms | 5.000 llamadas sobre JSON por stdin/stdout (`make bench-throughput`) |
 | `score_samples()` de IsolationForest, una fila | ~1,8ms | costo dominante en el pipeline completo — ver abajo |
 | `predict()` de LightGBM, una fila | p50 0,064ms, p95 0,112ms | |
-| **Solicitud completa `/detect-fraud`** (todas las capas + FastAPI) | **p50 4,19ms, p95 5,51ms, max 6,23ms** | 200 solicitudes via `TestClient` de FastAPI |
+| **Solicitud completa `/detect-fraud`** (todas las capas + FastAPI) | **p50 4,68ms, p95 6,16ms, max 84,0ms** | 200 solicitudes via `TestClient` de FastAPI, con 20 solicitudes de calentamiento previas |
 
 **Hallazgo honesto**: el objetivo de "< 1ms" del brief es real y se cumple
-— para el modulo C especificamente, a 45,5 nanosegundos por llamada, cuatro
-ordenes de magnitud bajo el presupuesto. *No* es lo que logra el pipeline
-completo de punta a punta, y afirmar lo contrario tergiversaria la
-medicion. El cuello de botella real es `IsolationForest.score_samples()`
+— para el modulo C especificamente, a 31,0 nanosegundos por llamada, cuatro
+ordenes de magnitud bajo el presupuesto (numero de esta corrida; una
+repeticion de `make bench-c` en la misma maquina se ha movido entre ~30-46
+ns/llamada entre sesiones — ruido de temporizador/scheduler a esta escala,
+no una regresion). *No* es lo que logra el pipeline completo de punta a
+punta, y afirmar lo contrario tergiversaria la medicion. El maximo de
+84,0ms del pipeline completo arriba es un solo valor atipico entre 200
+solicitudes ya calentadas (el p95 se mantuvo en 6,16ms) — consistente con
+una pausa de scheduling del sistema operativo mas que un costo sistematico,
+y vale la pena reportarlo en vez de recortarlo porque es una observacion
+real. El cuello de botella real es `IsolationForest.score_samples()`
 de `sklearn`: su costo por llamada esta dominado por la iteracion a nivel
 de Python sobre los arboles, que apenas se amortiza para una prediccion de
 una sola fila (el caso comun en produccion, a diferencia del entrenamiento).
@@ -377,9 +384,9 @@ corrida bajo un segundo):
 
 | # | Mecanismo | Throughput | Latencia p50 | Latencia p99 |
 |---|---|---:|---:|---:|
-| 1 | `CVelocityEngine` (llamada DLL `ctypes`, en el mismo proceso) | 467.914 req/s | 2,0us | 2,5us |
-| 2 | `MmapFeatureStoreClient` (IPC de memoria compartida, proceso separado) | **549.731 req/s** | 1,7us | 1,9us |
-| 3 | `RubyRulesEngine` (pipe de subproceso, JSON sobre stdin/stdout) | 14.216 req/s | 66,8us | 90,8us |
+| 1 | `CVelocityEngine` (llamada DLL `ctypes`, en el mismo proceso) | 421.527 req/s | 2,0us | 4,4us |
+| 2 | `MmapFeatureStoreClient` (IPC de memoria compartida, proceso separado) | **567.829 req/s** | 1,7us | 1,8us |
+| 3 | `RubyRulesEngine` (pipe de subproceso, JSON sobre stdin/stdout) | 12.298 req/s | 75,4us | 212,8us |
 
 Los tres superan comodamente el objetivo de 10.000 req/s — incluido el
 transporte por pipe, pese a ser ~30x mas lento por llamada que las dos
@@ -493,6 +500,23 @@ correctamente conectadas, y se confirmo que cambian con trafico real.
 ![Matriz de Confusion](outputs/plots/confusion_matrix.png)
 ![Importancia de Atributos](outputs/plots/feature_importance.png)
 
+## 6.3 Interactivo: separacion de puntajes + throughput IPC
+
+Un grafico Plotly autocontenido (sin dependencias externas, funciona desde
+el link de preview estatico abajo) que combina dos vistas de esta misma
+corrida: la distribucion de probabilidad de fraude en el test split para
+cada uno de los cinco modelos de §6.1.1 (menu desplegable para cambiar de
+modelo, legitimo vs. fraude superpuestos para ver que tan limpiamente
+separa cada modelo las dos clases), y los tres mecanismos de throughput
+IPC/FFI de §6.1 en escala logaritmica, con latencia p50/p99 al pasar el
+mouse.
+
+**[Abrir el grafico interactivo](https://htmlpreview.github.io/?https://github.com/Rxyxs/chile-polyglot-fraud-engine/blob/main/outputs/interactive/model_scores_and_throughput.html)**
+(`outputs/interactive/model_scores_and_throughput.html`, generado desde las
+predicciones por fila del test split en
+`outputs/reports/model_comparison.duckdb` y los numeros de `make
+bench-throughput` de esta corrida)
+
 # 7. Conclusion
 
 La pregunta que este proyecto buscaba responder no era "¿puede un
@@ -577,7 +601,8 @@ chile-polyglot-fraud-engine/
 │   └── python/                  # bridge, generate_data, train_model, api, latencia, feature store mmap
 ├── outputs/
 │   ├── models/       # DLL/exe compilados + artefactos entrenados (en .gitignore, `make all` regenera)
-│   ├── plots/        # curva PR, matriz de confusion, importancia de atributos (versionados)
+│   ├── plots/        # curva PR, matriz de confusion, importancia de atributos, ROC/activacion (versionados)
+│   ├── interactive/  # Plotly HTML autocontenido: distribucion de puntajes + throughput IPC (versionado)
 │   └── reports/      # training_report.json (en .gitignore, los numeros estan en este README)
 ├── Makefile
 ├── requirements.txt

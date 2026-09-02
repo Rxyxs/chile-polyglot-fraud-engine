@@ -68,9 +68,9 @@ simulate it:
 | Metric | Result | What it means |
 |---|---|---|
 | Fraud recall (test split) | 110/110 (100%) | Every fraud archetype caught, 0 false positives on 7,390 legit transactions |
-| C hot-path latency | ~2 µs/call | Real-time scoring feasible at high transaction volume |
-| Mmap feature-store throughput | ~550,000 req/s | Fastest of 3 measured IPC/FFI paths — beats even the in-process ctypes call |
-| Ruby rules-engine throughput | ~14,000-15,000 req/s | Slowest layer, correctly identified via per-layer Prometheus/Grafana latency panels |
+| C hot-path latency | ~2 µs/call via ctypes, 31 ns in a pure-C loop | Real-time scoring feasible at high transaction volume |
+| Mmap feature-store throughput | ~568,000 req/s | Fastest of 3 measured IPC/FFI paths — beats even the in-process ctypes call |
+| Ruby rules-engine throughput | ~12,000-14,000 req/s | Slowest layer, correctly identified via per-layer Prometheus/Grafana latency panels |
 | Test coverage | 60/60 passing | C (11), Ruby (10), Python (39) — all three languages, one `make test` |
 | Observability | Live p99-per-layer dashboard | Grafana answers "which layer dominates tail latency" continuously, not just via a one-off benchmark |
 
@@ -80,7 +80,7 @@ simulate it:
 flowchart TB
     TX[Transaction] --> API[FastAPI /detect-fraud]
     API --> C["C: fraud_core.c<br/>ctypes, ~2µs/call<br/>velocity/geo features"]
-    API --> RB["Ruby: rules_engine.rb<br/>subprocess pipe, ~66µs/call<br/>blacklist/structuring/velocity rules"]
+    API --> RB["Ruby: rules_engine.rb<br/>subprocess pipe, ~75µs/call<br/>blacklist/structuring/velocity rules"]
     C --> ML["Python: IsolationForest → LightGBM<br/>weighs C + Ruby signals"]
     RB --> ML
     ML --> OUT[(fraud_probability, is_fraud)]
@@ -106,7 +106,7 @@ src/python/api.py -- FastAPI /detect-fraud   -----> /metrics (Prometheus)
    |
    |---> [Ruby] src/ruby/rules_engine.rb
    |            persistent `--server` subprocess, newline-JSON
-   |            over stdin/stdout, ~66us/call
+   |            over stdin/stdout, ~75us/call
    |            -> blacklisted merchant, high-risk country,
    |               structuring pattern, velocity-burst rule
    |
@@ -315,17 +315,23 @@ rather than confirming a foregone conclusion.
 
 | Layer | Measured cost | How |
 |---|---|---|
-| C module, pure C benchmark | **45.5 ns/call** | `src/c/bench_main.c`, 2,000,000 iterations, `make bench-c` |
-| C module via `ctypes` from Python | p50 0.0019ms, p95 0.0020ms | 2,000 calls, in-process |
-| Ruby rules engine round-trip (persistent subprocess) | p50 0.070ms, p95 0.092ms, max 0.237ms | 300 calls over stdin/stdout JSON |
+| C module, pure C benchmark | **31.0 ns/call** | `src/c/bench_main.c`, 2,000,000 iterations, `make bench-c` |
+| C module via `ctypes` from Python | p50 0.00180ms, p95 0.00220ms | 2,000 calls, in-process (`tests/python/test_latency.py`) |
+| Ruby rules engine round-trip (persistent subprocess) | p50 0.075ms, p99 0.213ms | 5,000 calls over stdin/stdout JSON (`make bench-throughput`) |
 | IsolationForest `score_samples()`, single row | ~1.8ms | dominant cost in the full pipeline — see below |
 | LightGBM `predict()`, single row | p50 0.064ms, p95 0.112ms | |
-| **Full `/detect-fraud` request** (all layers + FastAPI) | **p50 4.19ms, p95 5.51ms, max 6.23ms** | 200 requests via FastAPI `TestClient` |
+| **Full `/detect-fraud` request** (all layers + FastAPI) | **p50 4.68ms, p95 6.16ms, max 84.0ms** | 200 requests via FastAPI `TestClient`, 20-request warm-up first |
 
 **Honest finding**: the brief's "< 1ms" target is real and met — for the C
-module specifically, at 45.5 nanoseconds per call, four orders of magnitude
-under budget. It is *not* what the full pipeline achieves end-to-end, and
-claiming otherwise would misrepresent the measurement. The actual
+module specifically, at 31.0 nanoseconds per call, four orders of magnitude
+under budget (this run's number; a re-run of `make bench-c` on the same
+machine has moved between ~30-46 ns/call across sessions — timer/scheduler
+noise at this scale, not a regression). It is *not* what the full pipeline
+achieves end-to-end, and claiming otherwise would misrepresent the
+measurement. The full-pipeline max of 84.0ms above is a single outlier
+among 200 warmed-up requests (p95 stayed at 6.16ms) — consistent with an
+OS scheduling stall rather than a systematic cost, and worth reporting
+rather than trimming since it is a real observation. The actual
 bottleneck is `sklearn`'s `IsolationForest.score_samples()`: its per-call
 overhead is dominated by Python-level iteration across trees, which barely
 amortizes for a single-row prediction (the common case at serving time,
@@ -349,9 +355,9 @@ paths', to keep the run under a second):
 
 | # | Mechanism | Throughput | p50 latency | p99 latency |
 |---|---|---:|---:|---:|
-| 1 | `CVelocityEngine` (in-process `ctypes` DLL call) | 467,914 req/s | 2.0us | 2.5us |
-| 2 | `MmapFeatureStoreClient` (shared-memory IPC, separate process) | **549,731 req/s** | 1.7us | 1.9us |
-| 3 | `RubyRulesEngine` (subprocess pipe, JSON over stdin/stdout) | 14,216 req/s | 66.8us | 90.8us |
+| 1 | `CVelocityEngine` (in-process `ctypes` DLL call) | 421,527 req/s | 2.0us | 4.4us |
+| 2 | `MmapFeatureStoreClient` (shared-memory IPC, separate process) | **567,829 req/s** | 1.7us | 1.8us |
+| 3 | `RubyRulesEngine` (subprocess pipe, JSON over stdin/stdout) | 12,298 req/s | 75.4us | 212.8us |
 
 All three clear the 10,000 req/s target comfortably — including the pipe
 transport, despite being ~30x slower per call than the two C paths.
@@ -453,6 +459,20 @@ are real, correctly wired, and confirmed to change on real traffic.
 ![Confusion Matrix](outputs/plots/confusion_matrix.png)
 ![Feature Importance](outputs/plots/feature_importance.png)
 
+## 6.3 Interactive: score separation + IPC throughput
+
+A self-contained Plotly chart (no external dependencies, works from the
+static preview link below) combining two views from this same run: the
+test-set fraud-probability distribution for each of the five models in
+§6.1.1 (dropdown to switch models, legit vs. fraud overlaid so you can see
+how cleanly each model separates the two), and the three IPC/FFI throughput
+mechanisms from §6.1 on a log scale, with p50/p99 latency in the hover.
+
+**[Open the interactive chart](https://htmlpreview.github.io/?https://github.com/Rxyxs/chile-polyglot-fraud-engine/blob/main/outputs/interactive/model_scores_and_throughput.html)**
+(`outputs/interactive/model_scores_and_throughput.html`, generated from
+`outputs/reports/model_comparison.duckdb`'s per-row test predictions and
+this run's `make bench-throughput` numbers)
+
 # 7. Conclusion
 
 The question this project set out to answer wasn't "can a classifier catch
@@ -530,7 +550,8 @@ chile-polyglot-fraud-engine/
 │   └── python/                  # bridge, generate_data, train_model, api, latency, mmap feature store
 ├── outputs/
 │   ├── models/       # compiled DLL/exe + trained artifacts (gitignored, `make all` regenerates)
-│   ├── plots/        # PR curve, confusion matrix, feature importance (tracked)
+│   ├── plots/        # PR curve, confusion matrix, feature importance, ROC/activation comparison (tracked)
+│   ├── interactive/  # self-contained Plotly HTML: score distributions + IPC throughput (tracked)
 │   └── reports/      # training_report.json (gitignored, numbers are in this README)
 ├── Makefile
 ├── requirements.txt

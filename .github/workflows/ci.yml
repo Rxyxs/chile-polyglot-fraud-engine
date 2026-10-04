@@ -1,0 +1,67 @@
+name: CI
+
+# El proyecto es Windows por diseno (capa C con MSVC, canal mmap con nombre), asi que corre en
+# un runner Windows y prueba las tres capas: C, Ruby y Python.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: true
+          working-directory: src/ruby
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt flake8
+
+      - name: Lint (fails only on syntax errors and undefined names)
+        run: flake8 src tests/python --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Build the C layer (MSVC)
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File src/c/build.ps1
+
+      - name: C tests
+        run: .\outputs\models\fraud_core_test.exe
+
+      - name: Ruby rules engine (RSpec)
+        working-directory: src/ruby
+        run: bundle exec rspec ../../tests/ruby/rules_engine_spec.rb --format documentation
+
+      - name: Generate data and train the models
+        run: |
+          python -m src.python.generate_data
+          python -m src.python.train_model
+          python -m src.python.train_extra_models
+
+      - name: Python tests
+        run: python -m pytest -v

@@ -4,6 +4,7 @@
 
 ## Motor Poliglota de Fraude — Nucleo de Velocidad en C + DSL de Reglas en Ruby + ML en Python
 
+![CI](https://github.com/Rxyxs/chile-polyglot-fraud-engine/actions/workflows/ci.yml/badge.svg)
 ![C](https://img.shields.io/badge/C-C11-A8B9CC?style=flat&logo=c&logoColor=white)
 ![Ruby](https://img.shields.io/badge/Ruby-3.2%2B-CC342D?style=flat&logo=ruby&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat&logo=python&logoColor=white)

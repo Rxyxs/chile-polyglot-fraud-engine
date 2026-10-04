@@ -14,6 +14,18 @@ $vcvarsCandidates = @(
 )
 $vcvars = $vcvarsCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $vcvars) {
+    # Cualquier otra edicion de Visual Studio (Enterprise, Professional, una version nueva):
+    # vswhere sabe donde esta la que tiene el toolset de C++ instalado.
+    $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($installPath) {
+            $candidate = Join-Path $installPath "VC\Auxiliary\Build\vcvars64.bat"
+            if (Test-Path $candidate) { $vcvars = $candidate }
+        }
+    }
+}
+if (-not $vcvars) {
     throw "No se encontro vcvars64.bat. Instala Visual Studio Build Tools (workload 'Desktop development with C++')."
 }
 

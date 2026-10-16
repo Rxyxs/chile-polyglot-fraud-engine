@@ -49,3 +49,6 @@ outputs/reports/*.duckdb
 # which was making GitHub misdetect the repo's primary language as HTML instead
 # of the real code. Regenerate locally from its source script.
 outputs/interactive/
+
+# Checkpoints de entrenamiento del MLP (se regeneran)
+outputs/models/checkpoints/

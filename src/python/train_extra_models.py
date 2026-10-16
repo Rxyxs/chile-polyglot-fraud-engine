@@ -27,8 +27,11 @@ metadata.json):
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import pathlib
+from pathlib import Path
 
 import duckdb
 import joblib
@@ -112,7 +115,26 @@ class FocalLoss(torch.nn.Module):
         return loss.mean()
 
 
-def _train_mlp(activation: str, X_train, y_train, X_val, y_val, n_epochs=40, lr=1e-3, seed=SEED):
+MIN_EPOCHS = 100  # ninguna red se detiene antes de 100 epocas
+MAX_EPOCHS = 300
+PATIENCE = 15
+
+
+def _fingerprint(*arrays, **config) -> str:
+    h = hashlib.sha256()
+    for a in arrays:
+        h.update(np.ascontiguousarray(np.asarray(a, dtype=np.float32)).tobytes())
+    h.update(json.dumps(config, sort_keys=True).encode())
+    return h.hexdigest()[:16]
+
+
+def _train_mlp(activation: str, X_train, y_train, X_val, y_val, n_epochs=MAX_EPOCHS, lr=1e-3, seed=SEED,
+               min_epochs=MIN_EPOCHS, patience=PATIENCE, checkpoint_path: Path | None = None, info: dict | None = None):
+    """Entrena con early stopping sobre el PR-AUC de la validacion temporal (el
+    mes anterior al test): al menos ``min_epochs`` epocas, desde ahi corta tras
+    ``patience`` epocas sin mejora y restaura la mejor epoca. Con
+    ``checkpoint_path`` el estado completo se guarda cada epoca y una corrida
+    interrumpida retoma donde quedo."""
     torch.manual_seed(seed)
     model = FraudMLP(X_train.shape[1], activation)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -124,28 +146,58 @@ def _train_mlp(activation: str, X_train, y_train, X_val, y_val, n_epochs=40, lr=
 
     batch_size = 512
     n = X_train_t.shape[0]
-    best_state, best_pr_auc = None, -1.0
+    fp = _fingerprint(X_train, y_train, X_val, y_val, activation=activation, n_epochs=n_epochs, lr=lr, seed=seed,
+                      min_epochs=min_epochs, patience=patience)
+    state = {"epoch": 0, "best_pr_auc": -1.0, "best_epoch": 0, "best_state": None, "bad_epochs": 0,
+             "done": False, "val_pr_auc": []}
+    if checkpoint_path is not None and Path(checkpoint_path).exists():
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if ckpt.get("fingerprint") == fp:
+            model.load_state_dict(ckpt["model"])
+            optimizer.load_state_dict(ckpt["optimizer"])
+            state = ckpt["state"]
 
-    for epoch in range(n_epochs):
+    def save_checkpoint() -> None:
+        if checkpoint_path is None:
+            return
+        path = Path(checkpoint_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        torch.save({"fingerprint": fp, "model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                    "state": state}, tmp)
+        tmp.replace(path)
+
+    while not state["done"] and state["epoch"] < n_epochs:
+        torch.manual_seed(seed + state["epoch"])  # misma permutacion y dropout al retomar
         model.train()
         perm = torch.randperm(n)
         for start in range(0, n, batch_size):
             idx = perm[start:start + batch_size]
             optimizer.zero_grad()
-            logits = model(X_train_t[idx])
-            loss = criterion(logits, y_train_t[idx])
+            loss = criterion(model(X_train_t[idx]), y_train_t[idx])
             loss.backward()
             optimizer.step()
+        state["epoch"] += 1
 
         model.eval()
         with torch.no_grad():
             val_proba = torch.sigmoid(model(X_val_t)).numpy()
-        pr_auc = average_precision_score(y_val, val_proba)
-        if pr_auc > best_pr_auc:
-            best_pr_auc = pr_auc
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        pr_auc = float(average_precision_score(y_val, val_proba))
+        state["val_pr_auc"].append(pr_auc)
+        if pr_auc > state["best_pr_auc"] + 1e-6:
+            state.update(best_pr_auc=pr_auc, best_epoch=state["epoch"], bad_epochs=0,
+                         best_state=copy.deepcopy(model.state_dict()))
+        else:
+            state["bad_epochs"] += 1
+        if state["epoch"] >= min(min_epochs, n_epochs) and state["bad_epochs"] >= patience:
+            state["done"] = True
+        save_checkpoint()
 
-    model.load_state_dict(best_state)
+    model.load_state_dict(state["best_state"])
+    state["done"] = True
+    save_checkpoint()
+    if info is not None:
+        info.update(best_epoch=state["best_epoch"], epochs_run=state["epoch"])
     return model
 
 
@@ -210,7 +262,10 @@ def main():
     print("[4/6] Training PyTorch MLP + Focal Loss, one run per activation (ReLU / GELU / Swish)...")
     activation_results = {}
     for activation in ACTIVATIONS:
-        model = _train_mlp(activation, X_train, y_train, X_val, y_val, seed=SEED)
+        info = {}
+        model = _train_mlp(activation, X_train, y_train, X_val, y_val, seed=SEED, info=info,
+                           checkpoint_path=MODELS_DIR / "checkpoints" / f"pytorch_mlp_{activation}.ckpt")
+        print(f"  {activation:>6}: mejor epoca {info['best_epoch']} de {info['epochs_run']}")
         val_proba = _predict_mlp(model, X_val)
         threshold, _ = find_best_f1_threshold(y_val, val_proba)
         test_proba = _predict_mlp(model, X_test)

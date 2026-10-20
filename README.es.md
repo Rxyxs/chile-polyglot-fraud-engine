@@ -16,7 +16,7 @@
 ![Prometheus](https://img.shields.io/badge/Prometheus-metricas-E6522C?style=flat&logo=prometheus&logoColor=white)
 ![Grafana](https://img.shields.io/badge/Grafana-dashboard-F46800?style=flat&logo=grafana&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.3x-FF4B4B?style=flat&logo=streamlit&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-60%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
+![Tests](https://img.shields.io/badge/tests-61%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
 ![Status](https://img.shields.io/badge/status-research%20%2F%20datos%20sinteticos-lightgrey?style=flat)
 
 Un motor de deteccion de fraude en tres lenguajes para transacciones
@@ -30,7 +30,7 @@ DSL de reglas de negocio legible sobre un pipe de subproceso persistente, y
 consume las salidas de las otras dos capas como atributos, instrumentado de
 punta a punta con metricas **Prometheus** y un dashboard **Grafana**. Un
 solo comando (`make all`) compila, genera los datos y entrena todo;
-`make test` ejecuta los 60 tests (11 en C, 10 RSpec, 39 pytest) — cada
+`make test` ejecuta los 61 tests (11 en C, 10 RSpec, 40 pytest) — cada
 numero de este README proviene de ejecutar eso en esta maquina.
 
 ---
@@ -74,10 +74,11 @@ directamente, no para simularlo:
 | Métrica | Resultado | Qué significa |
 |---|---|---|
 | Recall de fraude (test split) | 110/110 (100%) | Cada arquetipo de fraude capturado, 0 falsos positivos en 7.390 transacciones legítimas |
+| **El mismo motor sobre fraude real (IEEE-CIS)** | PR-AUC 0,098, recall 28% con 5.474 falsos positivos | El puntaje sintético perfecto no se traslada; las capas C y Ruby no aportan sobre features ricas — ver §6.0.1 |
 | Latencia del hot-path en C | ~2 µs/llamada via ctypes, 31 ns en un loop C puro | Scoring en tiempo real viable a alto volumen de transacciones |
 | Throughput del feature store mmap | ~568.000 req/s | El más rápido de los 3 mecanismos IPC/FFI medidos -- supera incluso a la llamada ctypes en el mismo proceso |
 | Throughput del motor de reglas Ruby | ~12.000-14.000 req/s | La capa más lenta, identificada correctamente vía paneles de latencia por capa en Prometheus/Grafana |
-| Cobertura de tests | 60/60 pasando | C (11), Ruby (10), Python (39) -- los tres lenguajes, un solo `make test` |
+| Cobertura de tests | 61/61 pasando | C (11), Ruby (10), Python (40) -- los tres lenguajes, un solo `make test` |
 | Observabilidad | Dashboard p99-por-capa en vivo | Grafana responde "qué capa domina la latencia de cola" continuamente, no solo vía un benchmark puntual |
 
 # 3. Arquitectura
@@ -336,6 +337,26 @@ mayor, con la maquinaria de ajuste de umbral y seguimiento de costos en
 `train_model.py` (`find_best_f1_threshold`, el desglose de la matriz de
 confusion) haciendo trabajo real en vez de confirmar una conclusion ya
 decidida de antemano.
+
+## 6.0.1 El mismo motor sobre fraude real — IEEE-CIS
+
+La sección anterior sostiene que el puntaje perfecto prueba el cableado, no la detección de fraude. Esta mide cuán lejos está del fraude real. `src/python/real_ieee.py` pasa el núcleo de velocidad en C y el motor de reglas en Ruby **reales**, fila por fila con el mismo `build_features`, sobre **IEEE-CIS** (e-commerce de Vesta, competencia de Kaggle `ieee-fraud-detection`): 590.540 transacciones reales con tarjeta no presente, 3,5% de fraude. Mismos parámetros de LightGBM y mismo split cronológico 70/15/15 que `train_model.py`; umbrales elegidos en validación.
+
+El mapeo es parcial, y los vacíos son parte del resultado. IEEE-CIS no trae id de cliente (card1 + addr1 es el proxy habitual), no trae ubicación (así que el viaje imposible no puede dispararse) y sus códigos de producto y país están anonimizados (ninguno coincide con la lista negra ni con la lista de países de alto riesgo sintéticas). Los montos se pasan a pesos a 650 CLP/USD para que apliquen las reglas en UF.
+
+| LightGBM sobre... | PR-AUC | ROC-AUC | Precisión | Recall | Falsos positivos (test) |
+|---|---:|---:|---:|---:|---:|
+| Datos sintéticos (§6) | 1,000 | 1,000 | 1,000 | 1,000 | 0 de 7.390 |
+| **Features del motor, IEEE-CIS** | **0,098** | 0,727 | 0,135 | 0,277 | 5.474 de 85.498 |
+| Features nativas de IEEE-CIS | 0,515 | 0,898 | 0,558 | 0,437 | 1.069 |
+| Nativas + motor | 0,514 | 0,897 | 0,504 | 0,463 | 1.405 |
+
+Qué dice:
+
+- **Sobre fraude real las señales del motor son débiles.** Un PR-AUC de 0,098 contra una tasa base de 3,5% es un lift de unas 2,8 veces: real, pero lejos de la separación perfecta de los arquetipos sintéticos. Para atrapar el 28% del fraude levanta 5.474 falsas alarmas.
+- **El motor no aporta nada sobre features ricas.** Sumar las columnas de C y Ruby a las features propias de IEEE-CIS deja el PR-AUC en 0,514 frente a 0,515. Lo que calculan las tres capas (conteos por hora y día, un z-score del monto, flags de reglas) ya está contenido en las features del dataset, o queda dominado por ellas.
+- **Dos de los cuatro arquetipos no tienen con qué coincidir.** La lista negra y la regla de país de alto riesgo nunca se disparan, porque sus listas son inventadas, y el viaje imposible nunca se dispara porque no hay ubicación. Las reglas de Ruby marcan el 3,1% de los fraudes y el 1,7% de las transacciones legítimas, una señal débil. La velocidad es la única capa que todavía separa: los fraudes tienen una mediana de 2 transacciones de la tarjeta en las 24 h previas, las legítimas 1.
+- **Los números de ingeniería se sostienen.** Las 590.540 filas pasaron por la biblioteca C real y el proceso Ruby en 80 segundos (unas 7.400 filas/s de punta a punta, incluido el loop por fila de Python).
 
 ## Latencia (medida, no estimada — `tests/python/test_latency.py`)
 
@@ -636,7 +657,7 @@ pip install -r requirements.txt
 # Ruby, genera datos y entrena todo
 make all
 
-# Ejecuta los 60 tests en los tres lenguajes
+# Ejecuta los 61 tests en los tres lenguajes
 make test
 
 # Opcional: baseline de Regresion Logistica + MLP PyTorch (Focal Loss,

@@ -52,3 +52,6 @@ outputs/interactive/
 
 # Checkpoints de entrenamiento del MLP (se regeneran)
 outputs/models/checkpoints/
+
+# Real IEEE-CIS download (Kaggle competition data, not redistributable)
+data/raw/ieee/

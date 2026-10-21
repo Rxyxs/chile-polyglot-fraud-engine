@@ -16,7 +16,7 @@
 ![Prometheus](https://img.shields.io/badge/Prometheus-metrics-E6522C?style=flat&logo=prometheus&logoColor=white)
 ![Grafana](https://img.shields.io/badge/Grafana-dashboard-F46800?style=flat&logo=grafana&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.3x-FF4B4B?style=flat&logo=streamlit&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-60%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
+![Tests](https://img.shields.io/badge/tests-61%20passing%20(C%2BRuby%2BPython)-brightgreen?style=flat)
 ![Status](https://img.shields.io/badge/status-research%20%2F%20synthetic%20data-lightgrey?style=flat)
 
 A three-language fraud-detection engine for Chilean bank transactions,
@@ -29,7 +29,7 @@ readable business-rules DSL over a persistent subprocess pipe, and
 consumes both other layers' outputs as features, instrumented end to end
 with **Prometheus** metrics and a **Grafana** dashboard. One command
 (`make all`) builds, generates data, and trains everything; `make test` runs
-all 60 tests (11 C, 10 RSpec, 39 pytest) — every number below came from
+all 61 tests (11 C, 10 RSpec, 40 pytest) — every number below came from
 running that on this machine.
 
 ---
@@ -69,10 +69,11 @@ simulate it:
 | Metric | Result | What it means |
 |---|---|---|
 | Fraud recall (test split) | 110/110 (100%) | Every fraud archetype caught, 0 false positives on 7,390 legit transactions |
+| **Same engine on real fraud (IEEE-CIS)** | PR-AUC 0.098, recall 28% with 5,474 false positives | The perfect synthetic score does not carry over; the C and Ruby layers add nothing on top of rich features — see §6.0.1 |
 | C hot-path latency | ~2 µs/call via ctypes, 31 ns in a pure-C loop | Real-time scoring feasible at high transaction volume |
 | Mmap feature-store throughput | ~568,000 req/s | Fastest of 3 measured IPC/FFI paths — beats even the in-process ctypes call |
 | Ruby rules-engine throughput | ~12,000-14,000 req/s | Slowest layer, correctly identified via per-layer Prometheus/Grafana latency panels |
-| Test coverage | 60/60 passing | C (11), Ruby (10), Python (39) — all three languages, one `make test` |
+| Test coverage | 61/61 passing | C (11), Ruby (10), Python (40) — all three languages, one `make test` |
 | Observability | Live p99-per-layer dashboard | Grafana answers "which layer dominates tail latency" continuously, not just via a one-off benchmark |
 
 # 3. Architecture
@@ -311,6 +312,26 @@ recall well under 100% and a meaningfully larger false-positive count, with
 the threshold-tuning and cost-tracking machinery in `train_model.py`
 (`find_best_f1_threshold`, the confusion-matrix breakdown) doing real work
 rather than confirming a foregone conclusion.
+
+## 6.0.1 The same engine on real fraud — IEEE-CIS
+
+The section above argues that the perfect score proves the wiring, not the fraud detection. This measures how far it is from real fraud. `src/python/real_ieee.py` runs the **real** C velocity core and Ruby rules engine, row by row through the same `build_features`, over **IEEE-CIS** (Vesta e-commerce, Kaggle competition `ieee-fraud-detection`): 590,540 real card-not-present transactions, 3.5% fraud. Same LightGBM settings and the same chronological 70/15/15 split as `train_model.py`; thresholds chosen on validation.
+
+The mapping is partial, and the gaps are part of the result. IEEE-CIS has no customer id (card1 + addr1 is the usual proxy), no location (so impossible travel cannot fire), and anonymized product and country codes (none match the synthetic blacklist or high-risk list). Amounts are converted to pesos at 650 CLP/USD so the UF rules apply.
+
+| LightGBM on... | PR-AUC | ROC-AUC | Precision | Recall | False positives (test) |
+|---|---:|---:|---:|---:|---:|
+| Synthetic data (§6) | 1.000 | 1.000 | 1.000 | 1.000 | 0 of 7,390 |
+| **Engine features, IEEE-CIS** | **0.098** | 0.727 | 0.135 | 0.277 | 5,474 of 85,498 |
+| IEEE-CIS native features | 0.515 | 0.898 | 0.558 | 0.437 | 1,069 |
+| Native + engine features | 0.514 | 0.897 | 0.504 | 0.463 | 1,405 |
+
+What it says:
+
+- **On real fraud the engine's signals are weak.** PR-AUC 0.098 against a 3.5% base rate is a lift of about 2.8x: real, but far from the perfect separation of the synthetic archetypes. To catch 28% of fraud it raises 5,474 false alarms.
+- **The engine adds nothing on top of rich features.** Adding the C and Ruby columns to IEEE-CIS's own features leaves PR-AUC at 0.514 versus 0.515. What the three layers compute (counts per hour and day, an amount z-score, rule flags) is already contained in, or dominated by, the dataset's engineered features.
+- **Two of the four archetypes have nothing to match.** The blacklist and the high-risk-country rule never fire, because their lists are invented, and impossible travel never fires because there is no location. The Ruby rules flag 3.1% of frauds and 1.7% of legitimate transactions, a weak signal. Velocity is the one layer that still separates: frauds have a median of 2 card transactions in the previous 24 h, legitimate ones 1.
+- **The engineering numbers stand.** All 590,540 rows went through the real C library and the Ruby process in 80 seconds (about 7,400 rows/s end to end, including Python's per-row loop).
 
 ## Latency (measured, not estimated — `tests/python/test_latency.py`)
 
@@ -585,7 +606,7 @@ pip install -r requirements.txt
 # generate data, train everything
 make all
 
-# Run all 60 tests across all three languages
+# Run all 61 tests across all three languages
 make test
 
 # Optional: Logistic Regression baseline + PyTorch MLP (Focal Loss,

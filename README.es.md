@@ -434,9 +434,9 @@ split temporal:
 | Modelo | Precision | Recall | F1 | ROC-AUC | PR-AUC |
 |---|---:|---:|---:|---:|---:|
 | Regresion Logistica (baseline) | 0.791 | 0.927 | 0.854 | 0.997 | 0.949 |
-| MLP PyTorch + Focal Loss (ReLU) | 0.945 | 0.936 | 0.941 | 0.9995 | 0.983 |
-| MLP PyTorch + Focal Loss (GELU) | 0.945 | 0.936 | 0.941 | 0.9992 | 0.984 |
-| MLP PyTorch + Focal Loss (Swish) | 0.862 | 0.964 | 0.910 | 0.9993 | 0.982 |
+| MLP PyTorch + Focal Loss (ReLU) | 0.962 | 0.927 | 0.944 | 0.9996 | 0.986 |
+| MLP PyTorch + Focal Loss (GELU) | 0.962 | 0.927 | 0.944 | 0.9994 | 0.985 |
+| MLP PyTorch + Focal Loss (Swish) | 0.904 | 0.945 | 0.924 | 0.9994 | 0.985 |
 | **IsolationForest + LightGBM (produccion)** | **1.000** | **1.000** | **1.000** | **1.000** | **1.000** |
 
 *(split de test, semilla 42, una ejecucion real de `make train-extra` en
@@ -453,8 +453,13 @@ que es tan limpio" (los atributos construidos, especialmente
 `rules_risk_score` y `velocity_score`, ya cargan la mayor parte de la
 señal separable por si solos). Las variantes del MLP cierran casi toda la
 brecha restante frente a la regresion logistica sin importar la
-activacion elegida — GELU y Swish superan levemente a ReLU en PR-AUC de
-validacion en esta corrida, pero la diferencia (≈0,001) esta dentro del
+activacion elegida. Cada MLP entrena al menos 100 epocas (maximo 300) con
+early stopping sobre el PR-AUC del mes de validacion (patience 15),
+restaura la mejor epoca y guarda un checkpoint cada epoca; las 40 epocas
+fijas anteriores se quedaban cortas, ya que las mejores epocas caen ahora
+entre la 74 y la 81, y todas las variantes ganan un poco en test (F1 de
+ReLU/GELU 0,941 → 0,944, Swish 0,910 → 0,924). Swish tiene el PR-AUC de
+validacion mas alto en esta corrida, pero la diferencia (≈0,002) esta dentro del
 ruido esperable para una comparacion de tres alternativas con este tamaño
 de dataset, asi que ninguna activacion deberia leerse como confiablemente
 superior aqui. Solo el ensamble de dos etapas alcanza un puntaje

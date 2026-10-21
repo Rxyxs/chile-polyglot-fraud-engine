@@ -399,9 +399,9 @@ supervised approaches on the **identical** feature matrix (including
 | Model | Precision | Recall | F1 | ROC-AUC | PR-AUC |
 |---|---:|---:|---:|---:|---:|
 | Logistic Regression (baseline) | 0.791 | 0.927 | 0.854 | 0.997 | 0.949 |
-| PyTorch MLP + Focal Loss (ReLU) | 0.945 | 0.936 | 0.941 | 0.9995 | 0.983 |
-| PyTorch MLP + Focal Loss (GELU) | 0.945 | 0.936 | 0.941 | 0.9992 | 0.984 |
-| PyTorch MLP + Focal Loss (Swish) | 0.862 | 0.964 | 0.910 | 0.9993 | 0.982 |
+| PyTorch MLP + Focal Loss (ReLU) | 0.962 | 0.927 | 0.944 | 0.9996 | 0.986 |
+| PyTorch MLP + Focal Loss (GELU) | 0.962 | 0.927 | 0.944 | 0.9994 | 0.985 |
+| PyTorch MLP + Focal Loss (Swish) | 0.904 | 0.945 | 0.924 | 0.9994 | 0.985 |
 | **IsolationForest + LightGBM (production)** | **1.000** | **1.000** | **1.000** | **1.000** | **1.000** |
 
 *(test split, seed 42, one real run of `make train-extra` on this machine —
@@ -417,8 +417,13 @@ the per-activation validation-split comparison.)*
 engineered features, especially `rules_risk_score` and `velocity_score`,
 carry most of the separable signal on their own). The MLP variants close
 most of the remaining gap over logistic regression regardless of
-activation choice — GELU and Swish edge out ReLU on validation PR-AUC in
-this run, but the difference (≈0.001) is well inside noise for a
+activation choice. Each MLP trains at least 100 epochs (at most 300) with
+early stopping on the validation month's PR-AUC (patience 15), restores the
+best epoch and checkpoints its state every epoch; the previous fixed 40
+epochs stopped too early, since the best epochs now land at 74-81, and
+every variant gains a little on test (ReLU/GELU F1 0.941 → 0.944, Swish
+0.910 → 0.924). Swish has the highest validation PR-AUC in this run, but
+the difference (≈0.002) is well inside noise for a
 three-way comparison at this dataset size, so no single activation should
 be read as reliably superior here. Only the two-stage ensemble reaches a
 perfect score, consistent with §6's explanation that it is a property of

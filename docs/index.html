@@ -47,11 +47,11 @@
 <h2>6.1.1 Modeling Approach Comparison — `make train-extra`</h2>
 <figure>
 <img src="figures/model_comparison_roc.png" alt="ROC curve comparison" loading="lazy">
-<figcaption><strong>Reading this honestly</strong>: the linear baseline already reaches 0.95+ PR-AUC</figcaption>
+<figcaption><strong>Reading this honestly</strong>: the linear baseline already reaches 0.95+ PR-AUC — confirming most of §6&#x27;s &quot;why it&#x27;s this clean&quot; explanation (the engineered features, especially <code>rules_risk_score</code> and <code>velocity_score</code>, carry most of the separable signal on their own). The MLP variants close most of the remaining gap over logistic regression regardless of activation choice.</figcaption>
 </figure>
 <figure>
 <img src="figures/activation_comparison.png" alt="Activation comparison" loading="lazy">
-<figcaption><strong>Reading this honestly</strong>: the linear baseline already reaches 0.95+ PR-AUC</figcaption>
+<figcaption><strong>Reading this honestly</strong>: the linear baseline already reaches 0.95+ PR-AUC — confirming most of §6&#x27;s &quot;why it&#x27;s this clean&quot; explanation (the engineered features, especially <code>rules_risk_score</code> and <code>velocity_score</code>, carry most of the separable signal on their own). The MLP variants close most of the remaining gap over logistic regression regardless of activation choice.</figcaption>
 </figure>
 <h2>6.2 Observability: Prometheus + Grafana</h2>
 <figure>
